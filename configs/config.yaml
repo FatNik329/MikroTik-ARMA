@@ -1,0 +1,171 @@
+# ===================================
+# Основная конфигурация MikroTik-ARMA
+# ===================================
+
+# Настройки оркестратора main_start.py
+# ====================================
+main_start:
+
+  logging:                                   # Настройки логирования
+    log_level: "INFO"                        ## Уровень детализации логов: DEBUG, INFO, WARNING, ERROR, CRITICAL
+
+  launch_chain:                              # Настройки цепочки запусков скриптов
+    base:                                    ## Основной функционал системы
+      dns_fwd: false                          ### Запускать скрипт dns_fwd.py (True/False)
+      fetch_as_prefixes: false                ### Запускать скрипт fetch_as_prefixes.py (True/False)
+      converter_addressLists: false           ### Запускать скрипт converter_addressLists.py (True/False)
+      sync_master: false                      ### Запускать скрипт sync_master.py (True/False)
+      sync_slave: false                       ### Запускать скрипт sync_slave.py (True/False)
+    additional:                              ## Дополнительный функционал системы
+      ip_analyst: false                        ### Запускать группу скриптов ip_analyst-*.py (True/False)
+      get_IP_Connections: false                ### Запускать группу скриптов get_IP_Connections-*.py (True/False)
+    maintenance:                             ## Обслуживающий функционал системы
+      logs_rotate: true                      ### Запускать скрипт logs_rotate.py (True/False)
+
+  settings_cache:                            # Раздел настроек кэша актуальности скриптов. Допустимые параметры (m/h/d/false - минуты/часы/дни/отключен)
+    base:                                    ## Актуальность запусков основного функционала
+      dns_fwd: "55m"
+      fetch_as_prefixes: "1d"
+      converter_addressLists: "1h"
+      sync_master: "7d"
+      sync_slave: "8d"
+    additional:                              ## Актуальность запусков дополнительного функционала
+      ip_analyst: "1d"
+      get_IP_Connections: "20m"
+    maintenance:                             ## Актуальность запусков обслуживающего функционала
+      logs_rotate: "false"                   ### Отключен - запуск без ограничений
+
+  settings_notify:                           # Раздел настроек уведомлений
+   type: "failure"                           # Тип уведомлений (all - все, failure - провалы, success - успех)
+   telegram: "false"                          # Включить отправку уведомлений в Telegram (true/false)
+   email: "false"                             # Включить отправку уведомлений на Email (true/false)
+   stop_on_error: "false"                    # Поведение при ошибке (остановить весь пайплайн - false, или продолжить - true).
+
+  scripts_discovery:                   # Секция расширения функционала Additional
+    additional:
+      patterns:                        # Паттерн масок скриптов (влияет на очередность исполнения)
+        - "get_IP_Connections-*.py"    # Группа выполнится 1-й
+        - "ip_analyst-*.py"            # Группа выполнится 2-й
+      base_name_patterns:
+        get_IP_Connections: "^get_IP_Connections"
+        ip_analyst: "^ip_analyst"
+
+# Настройки скрипта dns_fwd.py
+# ============================
+dns_fwd:
+
+  logging:
+    query_log_path: "/path/to/dnscrypt/logs/query.log"  # Основной путь до лог файла DNSCrypt
+    log_level: "INFO"                                   ## DEBUG/INFO/WARNING/ERROR/CRITICAL
+
+  resolver:
+    dns_servers:                 # Список используемых серверов DNS
+      - "127.0.0.1"              # DNSCrypt1 - localhost
+    ip_type:                     # Настройки резолвинга IP
+      ipv4: true                 # Резолвить IPv4 (True/False)
+      ipv6: true                 # Резолвить IPv6 (True/False)
+    ttl_failed_resolve: "1d"     # Период хранения кэша для доменов, которые не отрезолвились (1d/5d/2w/1m:day/week/month)
+    parallel:
+      enabled: false             # Включить параллельную обработку (true/false)
+      max_workers: 4             # Общее число потоков
+      batch_size: 50             # Доменов за раз
+      delay: 0.2                 # Задержка между пачками (сек.)
+    timeout: 3
+
+  storage_raw_data:               # Настройки хранения raw-data
+    retention_days_domain: "14d"  # Количество дней хранить неактивные домены
+    retention_days_ips: "7d"      # Количество дней хранить неактиные (historical) IP доменов
+    backup_files: 2               # Количество backup-копий
+    skip_duplicates: true         # Пропускать дубликаты шаблонов при формировании results-dns.yaml (true/false)
+
+# Настройки скрипта fetch_as_prefixes.py
+# ======================================
+fetch_as_prefixes:
+
+  logging:                  # Настройки логирования
+    log_level: "INFO"       ## Уровень детализации логов: DEBUG, INFO, WARNING, ERROR, CRITICAL
+
+  cache_serv:               # Настройки кэша
+    ttl: 86400              ## Время актуальности кэша (сек.) = 24 часа
+
+  settings_api:             # Настройки API получения префиксов ASN
+    delay: 2                ## Задержка между запросами
+    max_retries: 2          ## Количество запросов при неудачной попытке
+    user_agent: "ARMA - Get-Prefix - example@mail.com" # Настройки HTTP User-Agent. Укажите свои данные.
+
+  source_priority:          # Настройка приоритетов внеших источников
+    - "ripe_stat"           ## Первый приоритет
+    - "bgpview"             ## Второй приоритет
+    - "bgp_tools"           ## Третий приоритет
+
+  url_service:              # URL внешних сервисов для получения префиксов
+    bgp_view: "https://api.bgpview.io/asn/{asn}/prefixes"
+    ripe_stat: "https://stat.ripe.net/data/announced-prefixes/data.json?resource={asn}"
+    bgp_tools: "https://bgp.tools/table.txt"
+
+  ip_type:                  # Настройки получаемых префиксов
+    ipv4: true              ## true/false получать префиксы IPv4
+    ipv6: true              ## true/false получать префиксы IPv6
+
+  storage_raw_data:         # Настройки хранения необработанных данных
+    backup_files: 3         ## Количество хранимых бэкапов (по умолчанию 3)
+
+# Настройки скрипта converter_addressLists.py
+# ===========================================
+converter_add_list:
+
+  logging:                    # Настройки логирования
+    log_level: "INFO"         ## Уровень детализации логов: DEBUG, INFO, WARNING, ERROR, CRITICAL
+
+  settings_gen:                # Настройки генерации файлов *.rsc
+    skip_domains: false        ## Пропустить генерацию файлов с доменами (true/false)
+    skip_ips: false            ## Пропустить генерацию файлов с IP на основе доменных имён (true/false)
+    skip_asn: false            ## Пропустить генерацию файлов с AS префиксами (true/false)
+
+# Настройки скрипта sync_master.py
+# ================================
+sync_master:
+
+  logging:                      # Настройки логирования
+    log_level: "INFO"           # Уровень детализации логов: DEBUG, INFO, WARNING, ERROR, CRITICAL
+
+  sett_auth:                    # Настройки аутентификации
+    use_ssl: false              # Использовать SSL/TLS для подключения (true/false). При false данные передаются в открытом виде.
+
+  setting_sync:                 # Раздел настроек синхронизации Master
+    mode: "asn"                 ## Режим синхронизации:
+                                ### domains - домены | ips - IP-адреса | asn - AS-префиксы
+                                ### dom-asn - домены + ASN | ips-asn - IP доменов + ASN
+
+    update_delay: 0.1           ## Задержка между операциями (секунды)
+    batch_size: 3500            ## Пакетная обработка записей (BATCH_SIZE)
+    ipv4_sync: true             ## Включить/отключить синхронизацию IPv4 (True/False)
+    ipv6_sync: true             ## Включить/отключить синхронизацию IPv6 (True/False)
+
+# Настройки скрипта sync_slave.py
+# ===============================
+sync_slave:
+
+  logging:               # Настройки логирования
+    log_level: "DEBUG"   ## Уровень детализации логов: DEBUG, INFO, WARNING, ERROR, CRITICAL
+
+  sett_auth:             # Настройки аутентификации
+    use_ssl: false       ## Использовать SSL/TLS для подключения (true/false). При false данные передаются в открытом виде.
+
+  setting_sync:          # Основные параметры синхронизации
+    timeout: 3           ## Таймаут подключения к устройству (в секундах)
+    update_delay: 0.05   ## Задержка между операциями (секунды)
+    batсh_size: 1200     ## Пакетная обработка записей (BATCH_SIZE)
+
+  parallel:              # Настройки параллельной обработки
+    enabled: false       ## Включить параллельный режим (true/false)
+    count_slave: 2       ## Максимальное количество одновременно обрабатываемых Slave устройств
+    max_workers: 4       ## Общее количество рабочих потоков для обработки списков
+    batch_size: 100      ## Размер пакета для групповых операций в параллельном режиме
+    delay: 0.3           ## Задержка между пакетами операций в параллельном режиме (в секундах)
+
+# Настройки скрипта logs_rotate.py
+# ================================
+logs_rotate:
+  max_dir_size: 5         # Максимальный размер директории с логами (в МБ)
+  count_arch_logs: 3      # Количество архивов хранения

@@ -1,0 +1,8 @@
+# Ignore Directory
+cache/
+configs/AddressLists
+raw-data/
+output-data/
+logs/
+env/
+security/cert/

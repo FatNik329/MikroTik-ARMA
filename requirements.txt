@@ -1,0 +1,9 @@
+certifi==2025.7.9
+charset-normalizer==3.4.2
+dnspython==2.7.0
+idna==3.10
+json5==0.12.1
+PyYAML==6.0.2
+requests==2.32.4
+RouterOS-api==0.21.0
+urllib3==2.5.0
