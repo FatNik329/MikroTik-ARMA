@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 CONFIG = {
     # Пути к файлам
     'ip_list_dir': 'raw-data/list-IPServices',                          # Директория с исходными IP-адресами
-    'dns_file_filter': 'raw-data/list-Domain/DNS/results-dns.yaml',      # Файл с DNS записями
+    'dns_file_filter': 'none',               # Файл с DNS записями (исключает совпадения). Опциональный параметр, для отключения 'none'. Для включения указать путь до файла results-dns.yaml '/path/to/results-dns.yaml'
     'asn_file_filter': 'raw-data/list-PrefixAS/AS/results-as.json',       # Файл с ASN префиксами
     'output_dir': 'output-data/list-IPServices/Custom',                 # Кастомная директория для сохранения .rsc файла
 
@@ -174,21 +174,46 @@ def filter_as_data(as_data: Dict[str, List[ipaddress.IPv4Network]],
     return filtered_data
 
 def load_dns_ips(file_path: str) -> Set[str]:
-    """Загружает все IPv4 адреса из YAML файла с DNS записями"""
+    """Загружает все IPv4 адреса из YAML файла с DNS записями (новая структура)"""
+    if file_path.lower() == 'none':
+        logging.info("DNS фильтрация отключена (установлено 'none')")
+        return set()
+
     try:
         abs_path = validate_file_path(file_path, "DNS YAML файл")
         with open(abs_path, 'r') as f:
             data = yaml.safe_load(f)
 
         ip_set = set()
+        total_loaded = 0
 
         categories = data.get('categories', {})
-        for category in categories.values():
-            for domain_data in category.values():
-                ipv4_list = domain_data.get('ipv4', [])
-                ip_set.update(ipv4_list)
+        logging.debug(f"Найдено категорий DNS: {len(categories)}")
+
+        for category_name, category in categories.items():
+            category_count = 0
+            for domain, domain_data in category.items():
+                ipv4_data = domain_data.get('ipv4', {})
+                historical_ips = ipv4_data.get('historical', {})
+
+                # Берем только ключи (IP-адреса) из historical
+                if historical_ips:
+                    ip_set.update(historical_ips.keys())
+                    category_count += len(historical_ips)
+
+            logging.debug(f"Категория '{category_name}': {category_count} IP-адресов")
+            total_loaded += category_count
+
+        logging.info(f"Всего загружено DNS IP-адресов из historical: {total_loaded}")
+        logging.info(f"Уникальных DNS IP-адресов: {len(ip_set)}")
+
+        # Примеры загруженных IP
+        if ip_set:
+            sample_ips = list(ip_set)[:5]
+            logging.debug(f"Примеры загруженных DNS IP: {sample_ips}")
 
         return ip_set
+
     except Exception as e:
         logging.error(f"Ошибка загрузки DNS YAML файла: {e}")
         raise
@@ -343,7 +368,7 @@ def main():
 
         logging.info(f"Используемые пути и параметры:\n"
                     f"- Директория с IP списками: {ip_list_dir}\n"
-                    f"- DNS фильтр (исключает адреса): {dns_yaml_path}\n"
+                    f"- DNS фильтр (исключает адреса): {'Отключен' if dns_yaml_path.lower() == 'none' else dns_yaml_path}\n"
                     f"- ASN фильтр (входящие префиксы): {as_json_path}\n"
                     f"- Выходная директория данных: {output_dir}\n"
                     f"- Фильтр ASN: {CONFIG.get('asn_filter', 'Отключен')}\n"
@@ -359,9 +384,6 @@ def main():
 
         logging.info(f"Всего загружено IP-адресов из всех файлов: {len(all_source_ips)}")
 
-        logging.info("Загрузка DNS записей...")
-        dns_ips = load_dns_ips(dns_yaml_path)
-
         logging.info("Загрузка и подготовка AS префиксов...")
         as_data = load_as_prefixes(as_json_path, CONFIG.get('asn_filter'))
 
@@ -370,9 +392,15 @@ def main():
             logging.error("Нет данных AS для обработки после применения фильтра")
             return
 
-        # Поиск уникальных IP (объединённых из всех файлов)
-        unique_ips = all_source_ips - dns_ips
-        logging.info(f"Найдено {len(unique_ips)} уникальных IP-адресов")
+        # Логика фильтрации DNS
+        if dns_yaml_path.lower() == 'none':
+            logging.info("DNS фильтрация отключена - используются все исходные IP-адреса")
+            unique_ips = all_source_ips
+        else:
+            logging.info("Загрузка DNS записей...")
+            dns_ips = load_dns_ips(dns_yaml_path)
+            unique_ips = all_source_ips - dns_ips                            # Поиск уникальных IP (объединённых из всех файлов)
+            logging.info(f"Найдено {len(unique_ips)} уникальных IP-адресов")
 
         if not unique_ips:
             logging.warning("Нет уникальных IP-адресов для обработки")
