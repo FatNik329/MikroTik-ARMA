@@ -32,25 +32,93 @@ def setup_logging(config):
     return logging.getLogger(__name__)
 
 def load_comment_cache(list_name):
-    """Загружает кэш комментариев для указанного списка"""
+    """Загружает кэш комментариев для каждого списка с проверкой TTL"""
     cache_file = Path(f"cache/converter_addressLists/{list_name}.json")
+
+    # Загрузка конфига для получения TTL
+    config = load_config()
+    ttl_days = config.get("cache_sett", {}).get("ttl", 7)
+
+    # Проверка срока жизни кэша
+    if not cache_file.exists():
+        return {"dns": {"domains_v4": {}, "domains_v6": {}, "ips_v4": {}, "ips_v6": {}},
+                "asn": {"ips_v4": {}, "ips_v6": {}}}
+
     try:
-        if cache_file.exists():
-            with open(cache_file, 'r') as f:
-                return json.load(f)
+        # Чтение метаинформации из кэша
+        with open(cache_file, 'r') as f:
+            cache_data = json.load(f)
+
+        # Проверка наличия timestamp и TTL
+        if ('meta' not in cache_data or
+            'timestamp' not in cache_data['meta']):
+            logger.warning(f"Кэш {list_name} не содержит метаинформации, будет пересоздан")
+            cache_file.unlink()
+            return {"dns": {"domains_v4": {}, "domains_v6": {}, "ips_v4": {}, "ips_v6": {}},
+                    "asn": {"ips_v4": {}, "ips_v6": {}}}
+
+        # Проверка срока жизни
+        cache_time = datetime.fromisoformat(cache_data['meta']['timestamp'])
+        expiration_time = cache_time + timedelta(days=ttl_days)
+
+        if datetime.now() > expiration_time:
+            logger.info(f"Кэш для {list_name} устарел (TTL: {ttl_days} дней), будет создан новый")
+            cache_file.unlink()
+            return {"dns": {"domains_v4": {}, "domains_v6": {}, "ips_v4": {}, "ips_v6": {}},
+                    "asn": {"ips_v4": {}, "ips_v6": {}}}
+
+        # Возвращаем данные из кэша
+        return cache_data.get("data", {"dns": {"domains_v4": {}, "domains_v6": {}, "ips_v4": {}, "ips_v6": {}},
+                                      "asn": {"ips_v4": {}, "ips_v6": {}}})
+
     except Exception as e:
         logger.warning(f"Ошибка загрузки кэша для {list_name}: {e}")
-    return {"dns": {"domains_v4": {}, "domains_v6": {}, "ips_v4": {}, "ips_v6": {}}, 
-            "asn": {"ips_v4": {}, "ips_v6": {}}}
+        try:
+            if cache_file.exists():
+                cache_file.unlink()
+        except:
+            pass
+        return {"dns": {"domains_v4": {}, "domains_v6": {}, "ips_v4": {}, "ips_v6": {}},
+                "asn": {"ips_v4": {}, "ips_v6": {}}}
 
 def save_comment_cache(list_name, cache_data):
-    """Сохраняет обновлённый кэш комментариев"""
+    """Сохраняет обновлённый кэш комментариев с метаинформацией"""
     cache_dir = Path("cache/converter_addressLists")
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_file = cache_dir / f"{list_name}.json"
+
+    # Загрузка конфига для получения TTL
+    config = load_config()
+    ttl_days = config.get("cache_sett", {}).get("ttl", 7)
+
     try:
+        if cache_file.exists():
+            with open(cache_file, 'r') as f:
+                existing_data = json.load(f)
+
+            # Сохранение оригинальных метаданных (timestamp создание)
+            meta = existing_data.get("meta", {})
+            if not meta:
+                meta = {
+                    "timestamp": datetime.now().isoformat(),
+                    "ttl_days": ttl_days,
+                    "expires": (datetime.now() + timedelta(days=ttl_days)).isoformat()
+                }
+        else:
+            meta = {
+                "timestamp": datetime.now().isoformat(),
+                "ttl_days": ttl_days,
+                "expires": (datetime.now() + timedelta(days=ttl_days)).isoformat()
+            }
+
+        # Обновление данных, без изменения метаинформации
+        cache_with_meta = {
+            "meta": meta,
+            "data": cache_data
+        }
+
         with open(cache_file, 'w') as f:
-            json.dump(cache_data, f, indent=2)
+            json.dump(cache_with_meta, f, indent=2)
     except Exception as e:
         logger.error(f"Ошибка сохранения кэша для {list_name}: {e}")
 
