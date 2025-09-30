@@ -60,6 +60,22 @@ def find_all_log_dirs(base_dirs):
 def rotate_logs_in_dir(log_dir):
     """Ротация логов в одной директории"""
     print(f"\n📂 Обрабатывается директория: {log_dir}")
+
+    # 1. Удалять старые архивы сверх лимита
+    all_archives = sorted(
+        glob.glob(os.path.join(log_dir, "*.log.*.gz")),
+        key=os.path.getmtime  # Сначала старые
+    )
+
+    # Удалять лишние архивы
+    for old_archive in all_archives[:-MAX_LOG_VERSIONS] if MAX_LOG_VERSIONS > 0 else all_archives:
+        try:
+            os.remove(old_archive)
+            print(f"🧹 Удалён архив: {os.path.basename(old_archive)}")
+        except Exception as e:
+            print(f"⚠️ Ошибка удаления {os.path.basename(old_archive)}: {str(e)}")
+
+    # 2. Проверить размер и архивировать если нужно
     current_size = get_dir_size(log_dir)
     print(f"📊 Текущий размер: {current_size:.2f} MB")
 
@@ -67,11 +83,9 @@ def rotate_logs_in_dir(log_dir):
         print("✅ Размер в норме, архивация не требуется")
         return
 
-    # 1. Архивирует текущие логи (кроме .gz)
-    archived_count = 0
     current_logs = sorted(
         [f for f in glob.glob(os.path.join(log_dir, "*.log")) if not f.endswith('.gz')],
-        key=os.path.getmtime  # Сначала старые
+        key=os.path.getmtime
     )
 
     for log_file in current_logs:
@@ -79,7 +93,6 @@ def rotate_logs_in_dir(log_dir):
             break
 
         try:
-            # Имя архива: original.log.20240625_142022.gz
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             archive_name = f"{log_file}.{timestamp}.gz"
 
@@ -89,27 +102,9 @@ def rotate_logs_in_dir(log_dir):
 
             os.remove(log_file)
             print(f"📦 Заархивирован: {os.path.basename(log_file)} -> {os.path.basename(archive_name)}")
-            archived_count += 1
         except Exception as e:
-            print(f"⚠️ Ошибка: {os.path.basename(log_file)} ({str(e)})")
+            print(f"⚠️ Ошибка архивации {os.path.basename(log_file)}: {str(e)}")
 
-    # 2. Удаляет лишние архивы (параметр MAX_LOG_VERSIONS)
-    deleted_count = 0
-    all_archives = sorted(
-        glob.glob(os.path.join(log_dir, "*.log.*.gz")),
-        key=os.path.getmtime,
-        reverse=True
-    )
-
-    for old_archive in all_archives[MAX_LOG_VERSIONS:]:
-        try:
-            os.remove(old_archive)
-            print(f"🧹 Удалён архив: {os.path.basename(old_archive)}")
-            deleted_count += 1
-        except Exception as e:
-            print(f"⚠️ Ошибка удаления: {os.path.basename(old_archive)} ({str(e)})")
-
-    print(f"🔹 Итог: заархивировано {archived_count}, удалено {deleted_count} архивов")
     print(f"📊 Новый размер: {get_dir_size(log_dir):.2f} MB")
 
 def main():
