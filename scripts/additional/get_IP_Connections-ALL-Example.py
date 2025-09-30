@@ -9,24 +9,39 @@ from pathlib import Path
 from datetime import datetime
 from typing import List, Set, Optional, Dict, Any
 from routeros_api import RouterOsApiPool
-from routeros_api.exceptions import RouterOsApiConnectionError
+from routeros_api.exceptions import RouterOsApiConnectionError, RouterOsApiCommunicationError
 
 # ===== КОНФИГУРАЦИЯ СКРИПТА =====
-MIKROTIK_HOST = '<IP_host>'
-MIKROTIK_USER = '<User_connect>'
-MIKROTIK_PASS = '<Password_user>'
+# Параметры по умолчанию
+DEFAULT_USERNAME = 'MyUsername'
+DEFAULT_PASSWORD = 'PasswordUsername'
 API_PORT = 8728                  # API port (8728)
 API_SSL_PORT = 8729              # API-SSL port (8729)
 SSL = True   # Use SSL (True/False)
 
+# Индивидуальные учетные данные и параметры для конкретных устройств
+# Формат: "IP": ("username", "password", SSL, API порт)
+# Параметры SSL и порт опциональны
+SPECIAL_CREDENTIALS = {
+    "192.168.0.1": ("User1", "False", "PasswordUser1"),
+    "192.168.1.1": ("User2", "PasswordUser2"),
+    "192.168.2.1": ("User3", "False", "PasswordUser3"),
+}
+
+# Список устройств для получения списка Connection
+DEVICES = [
+    "192.168.0.1",    # Connect-Example1
+    "192.168.1.1",    # Connect-Example2
+    "192.168.2.1",    # Connect-Example3
+]
+
 # Внешняя фильтрация
 ## Пути к файлам (можно указать 'none' для отключения фильтрации)
-ASN_FILTER = 'raw-data/list-PrefixAS/AS/results-as.json'  # 'none' или 'path/to/results-as.json'
-DNS_FILTER = 'raw-data/list-Domain/DNS/results-dns.yaml' # 'none' или 'path/to/results-dns.yaml'
+ASN_FILTER = 'none'  # 'none' или 'path/to/results-as.json'
+DNS_FILTER = 'none' # 'none' или 'path/to/results-dns.yaml'
 OUTPUT_DIR = 'raw-data/list-IPServices/'   # Директория для выходных данных *.json
 
-# Фильтрация на уровне устройства
-## Фильтрация connections
+# Фильтрация на уровне устройства (connections)
 SRC_ADDRESS = 'ALL' # Фильтр адреса источника (параметры: 'ALL' - все SRC-ADDRESS connections. Или IP адрес источника: '192.168.0.10' или порт ':53')
 DST_ADDRESS = 'ALL'  # Фильтр адреса назначения (параметры 'ALL' - все DST-ADDRESS connections. Или IP адрес источника: '1.1.1.1' или порт ':443')
 CONN_MARK = 'none-mark' # Фильтр Connection Mark (параметры: none-mark - все соединения, без маркировки. Или наименование Connection Mark).
@@ -53,6 +68,33 @@ logging.basicConfig(
     ]
 )
 
+def get_device_credentials(device_ip: str) -> tuple[str, str, bool, int]:
+    """Получает учетные данные для конкретного устройства."""
+    if device_ip in SPECIAL_CREDENTIALS:
+        creds = SPECIAL_CREDENTIALS[device_ip]
+        username = creds[0]
+        password = creds[1]
+
+        # Определение SSL (по умолчанию использует глобальное значение)
+        ssl_flag = SSL
+        if len(creds) > 2:
+            ssl_flag = creds[2].lower() == "true"
+
+        # Определение порта (по умолчанию использует глобальный)
+        port = API_SSL_PORT if ssl_flag else API_PORT
+        if len(creds) > 3:
+            try:
+                port = int(creds[3])
+            except ValueError:
+                logging.warning(f"Устройство {device_ip} недоступно по порту, пробуем порт по умолчанию: {port}")
+    else:
+        username = DEFAULT_USERNAME
+        password = DEFAULT_PASSWORD
+        ssl_flag = SSL
+        port = API_SSL_PORT if ssl_flag else API_PORT
+
+    return username, password, ssl_flag, port
+
 def create_ssl_context() -> ssl.SSLContext:
     """Создает SSL контекст с отключенной проверкой сертификата."""
     ssl_context = ssl.create_default_context()
@@ -77,25 +119,37 @@ def connect_to_mikrotik(host: str, username: str, password: str, port: int, ssl_
         api = pool.get_api()
         logging.info(f"Успешное подключение к {host}")
         return pool
-    except RouterOsApiConnectionError as e:
-        logging.error(f"Ошибка подключения: {e}")
-        return None
-    except Exception as e:
-        logging.error(f"Неожиданная ошибка при подключении: {e}", exc_info=True)
+
+    except RouterOsApiCommunicationError as e:
+        # Обработка ошибки авторизации
+        error_msg = str(e)
+        if "invalid user name or password" in error_msg:
+            logging.error(f"Ошибка авторизации на устройстве {host}. Проверьте учётные данные (логин, пароль).")
+        else:
+            logging.error(f"Ошибка связи с устройством {host}: {error_msg}")
         return None
 
-def get_connections(api, src_address: str, dst_address: str, conn_mark: str, as_json_file: str, dns_yaml_file: str) -> List[Dict[str, Any]]:
+    except RouterOsApiConnectionError as e:
+        logging.error(f"Ошибка подключения к {host}: {e}")
+        return None
+
+    except Exception as e:
+        logging.error(f"Неожиданная ошибка при подключении к {host}: {e}", exc_info=True)
+        return None
+
+def get_connections(api, src_address: str, dst_address: str, conn_mark: str, as_json_file: str, dns_yaml_file: str, output_dir: str) -> List[Dict[str, Any]]:
     """Получает список соединений с MikroTik с применением фильтров."""
     try:
         connection_resource = api.get_resource('/ip/firewall/connection')
 
         # Выводит информацию о всех фильтрах
-        logging.info("=== НАСТРОЙКИ ФИЛЬТРАЦИИ ===")
+        logging.info("=== ОБЩИЕ ПАРАМЕТРЫ ===")
         logging.info(f"SRC_ADDRESS: '{src_address}'")
         logging.info(f"DST_ADDRESS: '{dst_address}'")
         logging.info(f"CONN_MARK: '{conn_mark}'")
         logging.info(f"ASN_FILTER: '{as_json_file}'")
         logging.info(f"DNS_FILTER: '{dns_yaml_file}'")
+        logging.info(f"OUTPUT_DIR: '{output_dir}'")
         logging.info("=" * 30)
 
         # Получает ВСЕ соединения
@@ -475,7 +529,7 @@ def create_new_data_structure() -> Dict[str, Any]:
             "created": current_time,
             "last_updated": current_time,
             "total_addresses": 0,
-            "source_device": MIKROTIK_HOST,
+            "source_device": DEVICES,
             "filters_applied": {
                 "src_address": SRC_ADDRESS,
                 "dst_address": DST_ADDRESS,
@@ -487,21 +541,21 @@ def create_new_data_structure() -> Dict[str, Any]:
         "addresses": {}
     }
 
-def main():
-    """Основная функция для выполнения процесса анализа соединений."""
-    logging.info("\n=== Запуск %s - анализ соединений (connection) MikroTik ===", script_name)
+def process_single_device(device_ip: str) -> bool:
+    """Обрабатывает одно устройство."""
+    logging.info(f"\n--- Обработка устройства {device_ip} ---")
 
-    # Подключение к MikroTik
-    port = API_SSL_PORT if SSL else API_PORT
-    pool = None
+    # Получаем учетные данные для устройства
+    username, password, ssl_flag, port = get_device_credentials(device_ip)
+
+    # Подключаемся к устройству
+    pool = connect_to_mikrotik(device_ip, username, password, port, ssl_flag)
+
+    if not pool:
+        logging.error(f"Не удалось подключиться к устройству {device_ip}")
+        return False
 
     try:
-        pool = connect_to_mikrotik(MIKROTIK_HOST, MIKROTIK_USER, MIKROTIK_PASS, port, SSL)
-
-        if not pool:
-            logging.error("Не удалось подключиться к MikroTik. Завершение работы.")
-            return
-
         api = pool.get_api()
 
         # Вывод всех connection-mark на устройстве
@@ -515,26 +569,24 @@ def main():
             dst_address=DST_ADDRESS,
             conn_mark=CONN_MARK,
             as_json_file=ASN_FILTER,
-            dns_yaml_file=DNS_FILTER
+            dns_yaml_file=DNS_FILTER,
+            output_dir=OUTPUT_DIR,
         )
         if not connections:
-            logging.warning("Не найдено соединений по заданным фильтрам")
-            return
+            logging.warning(f"Не найдено соединений по заданным фильтрам на устройстве {device_ip}")
+            return True
 
         # Определение типа адресов для извлечения
         if SRC_ADDRESS != 'ALL' and SRC_ADDRESS.startswith(':'):
-            # Если фильтрация по порту источника -> извлекаем SRC адреса
             extracted_addresses = extract_addresses(connections, filter_type='src')
         elif DST_ADDRESS != 'ALL' and DST_ADDRESS.startswith(':'):
-            # Если фильтрация по порту назначения -> извлекаем DST адреса
             extracted_addresses = extract_addresses(connections, filter_type='dst')
         else:
-            # По умолчанию извлекаются DST адреса
             extracted_addresses = extract_addresses(connections, filter_type='dst')
 
         if not extracted_addresses:
-            logging.warning("Не найдено IPv4 адресов")
-            return
+            logging.warning(f"Не найдено IPv4 адресов на устройстве {device_ip}")
+            return True
 
         # Загрузка данных AS
         as_prefixes = []
@@ -556,37 +608,63 @@ def main():
         if as_prefixes:
             filtered_by_as = filter_by_as_prefixes(extracted_addresses, as_prefixes)
         else:
-            filtered_by_as = extracted_addresses  # Без фильтрации
+            filtered_by_as = extracted_addresses
 
         # Фильтрация по DNS (IP)
         if dns_ips:
             final_addresses = filter_by_dns_ips(filtered_by_as, dns_ips)
         else:
-            final_addresses = filtered_by_as  # Без фильтрации
+            final_addresses = filtered_by_as
 
         if not final_addresses:
-            logging.warning("После фильтрации не осталось адресов")
-            return
+            logging.warning(f"После фильтрации не осталось адресов на устройстве {device_ip}")
+            return True
 
         # Генерация имени выходного файла и сохранение
-        filename = generate_filename(MIKROTIK_HOST, SRC_ADDRESS, DST_ADDRESS, CONN_MARK)
+        filename = generate_filename(device_ip, SRC_ADDRESS, DST_ADDRESS, CONN_MARK)
         save_results(final_addresses, OUTPUT_DIR, filename)
 
-        logging.info(f"Анализ завершен. Сохранено {len(final_addresses)} адресов")
+        logging.info(f"Обработка устройства {device_ip} завершена. Сохранено {len(final_addresses)} адресов")
+        return True
 
-    except RouterOsApiConnectionError as e:
-        logging.error(f"Ошибка подключения: {e}", exc_info=True)
+    except RouterOsApiCommunicationError as e:
+        # Дополнительная обработка ошибок API во время работы
+        error_msg = str(e)
+        if "invalid user name or password" in error_msg:
+            logging.error(f"Ошибка авторизации на устройстве {device_ip} во время выполнения команды. Проверьте учётные данные.")
+        else:
+            logging.error(f"Ошибка связи с устройством {device_ip} во время выполнения: {error_msg}")
+        return False
+
     except Exception as e:
-        logging.error(f"Неожиданная ошибка: {e}", exc_info=True)
+        logging.error(f"Ошибка при обработке устройства {device_ip}: {e}", exc_info=True)
+        return False
     finally:
         if pool:
             try:
                 pool.disconnect()
-                logging.info("Успешное отключение от MikroTik")
+                logging.info(f"Успешное отключение от устройства {device_ip}")
             except Exception as e:
-                logging.error(f"Ошибка при отключении: {e}", exc_info=True)
+                logging.error(f"Ошибка при отключении от устройства {device_ip}: {e}", exc_info=True)
 
-        logging.info("=== Обработка завершена ===")
+def main():
+    """Основная функция для выполнения процесса анализа соединений."""
+    logging.info("\n=== Запуск %s - анализ соединений (connection) MikroTik ===", script_name)
+    logging.info(f"Количество устройств: {len(DEVICES)} шт.")
+
+    success_count = 0
+    failed_count = 0
+
+    for device_ip in DEVICES:
+        if process_single_device(device_ip):
+            success_count += 1
+        else:
+            failed_count += 1
+
+    logging.info(f"\n=== Итоги обработки ===")
+    logging.info(f"Успешно обработано: {success_count} устройств")
+    logging.info(f"Не удалось обработать: {failed_count} устройств")
+    logging.info("=== Обработка завершена ===")
 
 if __name__ == "__main__":
     main()
