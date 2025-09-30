@@ -4,10 +4,10 @@ import ssl
 from pathlib import Path
 from datetime import datetime, timedelta
 from routeros_api import RouterOsApiPool
-from routeros_api.exceptions import RouterOsApiConnectionError
+from routeros_api.exceptions import RouterOsApiConnectionError, RouterOsApiCommunicationError
 from typing import List, Dict, Optional, Union
 
-# ===== КОНФИГУРАЦИЯ СКРИПТА =====
+# ===== Конфигурация скрипта =====
 MIKROTIK_HOST = '<IP_host>'
 MIKROTIK_USER = '<User_connect>'
 MIKROTIK_PASS = '<Password_user>'
@@ -16,13 +16,13 @@ API_SSL_PORT = 8729              # API-SSL port (8729)
 SSL = True                       # Use SSL (True/False)
 
 ADDRESS_LISTS = ['list-IPServices']    # Список адрес-листов для экспорта. Можно перечислить несколько, через ",".
-EXPORT_TYPE = 'all'                             # Тип выгружаемых данных 'static' - статичные, 'dynamic' - динамичные, или 'all' - все .
+EXPORT_TYPE = 'all'              # Тип выгружаемых данных 'static' - статичные, 'dynamic' - динамичные, или 'all' - все .
 OUTPUT_DIR = 'raw-data/list-IPServices'   # Директория для выходных данных
-MAX_AGE = '1000d 00:00:00'                      # Максимальный возраст записей (формат "dd hh:mm:ss") - старше удаляются
+MAX_AGE = '1000d 00:00:00'         # Максимальный возраст записей (формат "dd hh:mm:ss") - старше удаляются
 '''
-Заметка о MAX_AGE - макс. значение на MikroTik в разделе Address Lists для параметра Creation-Time = 248d 00:00:00 (RouterOS 6;7) .
+Пояснение к MAX_AGE - макс. значение на MikroTik в разделе Address Lists для параметра Creation-Time = 248d 00:00:00 (RouterOS 6,7) .
 Если выставить значение > 248d 00:00:00, скрипт не будет находить старые записи, соответственно, удаления старых записей не будет происходить.
-Может пригодиться, если записи не нужно удалять из листа при экспорте листа.
+Может пригодиться, если записи не нужно удалять из листа.
 '''
 
 # Автоматическое определение имени лог файла
@@ -52,12 +52,12 @@ def parse_mikrotik_time(time_str: str) -> datetime:
 def is_entry_expired(creation_time_str: str, max_age: str) -> bool:
     """Проверяет, истек ли срок жизни записи."""
     try:
-        # Парсинг максимального возраста
+        # Парсим максимальный возраст
         days, time = max_age.split(' ')
         h, m, s = map(int, time.split(':'))
         max_delta = timedelta(days=int(days[:-1]), hours=h, minutes=m, seconds=s)
 
-        # Парсинг время создания записи
+        # Парсим время создания записи
         create_time = parse_mikrotik_time(creation_time_str)
 
         return datetime.now() - create_time > max_delta
@@ -69,7 +69,7 @@ def cleanup_old_entries(api, list_name: str, max_age: str):
     """Удаляет устаревшие статические записи из адрес-листа."""
     try:
         resource = api.get_resource('/ip/firewall/address-list')
-        entries = resource.get(list=list_name, dynamic='no')  # Только статические
+        entries = resource.get(list=list_name, dynamic='no')
 
         deleted_count = 0
         for entry in entries:
@@ -108,7 +108,17 @@ def connect_to_mikrotik(host: str, username: str, password: str, port: int, ssl_
         )
         api = pool.get_api()
         logging.info(f"Успешное подключение к {host}")
-        return pool  # Возвращаем pool вместо api для правильного управления соединением
+        return pool
+
+    except RouterOsApiCommunicationError as e:
+        # Обработка ошибки авторизации
+        error_msg = str(e)
+        if "invalid user name or password" in error_msg:
+            logging.error(f"Ошибка авторизации на устройстве {host}. Проверьте учётные данные (логин, пароль).")
+        else:
+            logging.error(f"Ошибка связи с устройством {host}: {e}")
+        return None
+
     except RouterOsApiConnectionError as e:
         logging.error(f"Ошибка подключения: {e}")
         return None
@@ -121,7 +131,7 @@ def check_address_list_exists(api, list_name: str) -> bool:
     """Проверяет существование адрес-листа на MikroTik."""
     try:
         ipv4_resource = api.get_resource('/ip/firewall/address-list')
-        # Получаем уникальные адрес-листы
+        # Получение уникальных адрес-листов
         lists = set(item['list'] for item in ipv4_resource.get())
         return list_name in lists
     except Exception as e:
@@ -134,14 +144,13 @@ def get_address_list_entries(api, list_name: str, entry_type: str = 'all') -> Op
     try:
         ipv4_resource = api.get_resource('/ip/firewall/address-list')
 
-        # Формируем параметры запроса
+        # Формирование параметров запроса
         params = {'list': list_name}
         if entry_type in ['static', 'dynamic']:
             params['dynamic'] = 'yes' if entry_type == 'dynamic' else 'no'
 
         items = ipv4_resource.get(**params)
 
-        # Фильтруем только IPv4 адреса и извлекаем нужные данные
         entries = []
         for item in items:
             if 'address' in item:
@@ -158,16 +167,15 @@ def get_address_list_entries(api, list_name: str, entry_type: str = 'all') -> Op
 def save_to_file(addresses: Union[List[str], None], list_name: str, output_dir: str) -> bool:
     """Сохраняет адреса в текстовый файл, перезаписывая предыдущие данные."""
     try:
-        # Создаем папку, если она не существует
+        # Создаем директорию, если отсутствует
         os.makedirs(output_dir, exist_ok=True)
 
-        # Убеждаемся, что путь заканчивается на слеш
         if not output_dir.endswith('/') and not output_dir.endswith('\\'):
             output_dir += '/'
 
         filename = f"{output_dir}{list_name}.txt"
 
-        # Режим 'w' автоматически перезаписывает файл
+        # Перезаписываем файл
         with open(filename, 'w') as f:
             if addresses:
                 for address in addresses:
@@ -185,7 +193,7 @@ def save_to_file(addresses: Union[List[str], None], list_name: str, output_dir: 
         return False
 
 def main():
-    """Основная функция для выполнения процесса экспорта и очистки."""
+    """Основная функция процесса экспорта и очистки."""
     logging.info("\n=== Запуск %s - выгрузка адрес-листов MikroTik ===", script_name)
 
     # Подключаемся к MikroTik
@@ -219,10 +227,6 @@ def main():
             if not save_to_file(addresses, list_name, OUTPUT_DIR):
                 logging.error(f"Не удалось сохранить адрес-лист '{list_name}'")
 
-    except RouterOsApiConnectionError as e:
-        logging.error(f"Ошибка подключения: {e}", exc_info=True)
-    except Exception as e:
-        logging.error(f"Неожиданная ошибка: {e}", exc_info=True)
     finally:
         if pool:
             try:
