@@ -5,10 +5,13 @@
 [![License](https://img.shields.io/github/license/FatNik329/MikroTik-ARMA)](https://github.com/FatNik329/MikroTik-ARMA/blob/master/LICENSE)
 [![Release](https://img.shields.io/github/v/release/FatNik329/MikroTik-ARMA?color=brown)](https://github.com/FatNik329/MikroTik-ARMA/releases)
 [![Wiki badge](https://img.shields.io/badge/wiki-page-darkblue)](https://github.com/FatNik329/MikroTik-ARMA/wiki)
-[![Language](https://img.shields.io/badge/Python-v3.11-green)](https://www.python.org/downloads/)
+[![Language](https://img.shields.io/badge/Python-v3.11-green)](https://www.python.org/downloads)
 [![RouterOS](https://img.shields.io/badge/RouterOS-6.49-blue)](https://help.mikrotik.com/docs/display/ROS/RouterOS)
 [![DNScrypt-proxy](https://img.shields.io/badge/DNScrypt--proxy-page-silver)](https://github.com/jedisct1/dnscrypt-proxy)
-[![RouterAPI](https://img.shields.io/badge/RouterOS--api-page-turquoise)](https://pypi.org/project/RouterOS-api/)
+[![RouterAPI](https://img.shields.io/badge/RouterOS--api-page-turquoise)](https://pypi.org/project/RouterOS-api)
+[![RIPEstat](https://img.shields.io/badge/RIPEstat-page-darkblue)](https://stat.ripe.net)
+[![BGPView](https://img.shields.io/badge/BGPView-page-darkcyan)](https://bgpview.io)
+[![bgp.tools](https://img.shields.io/badge/bgp.tools-page-darkred)](https://bgp.tools)
 ![Russia](https://img.shields.io/badge/ru-Russia-white)
 
 <img src="images/arma-preview.jpg" alt="MikroTik-ARMA" style="width: 90%; max-width: 960px; max-height: 480px; aspect-ratio: 16/9; object-fit: contain;"/>
