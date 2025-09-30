@@ -5,7 +5,7 @@ import argparse
 import json
 from pathlib import Path
 from routeros_api import RouterOsApiPool
-from routeros_api.exceptions import RouterOsApiConnectionError
+from routeros_api.exceptions import RouterOsApiConnectionError, RouterOsApiCommunicationError
 import ssl
 import yaml
 
@@ -658,6 +658,15 @@ def process_device(device_id, device_config, list_name, config, args):
             logging.warning("IPv6 выключен на устройстве или в конфигурации. Пропускаем IPv6-синхронизацию.")
 
         return sync_list(api, list_name, mode, config, device_config, args)
+
+    except RouterOsApiCommunicationError as e:
+        # Обработка ошибки авторизации
+        error_msg = str(e)
+        if "invalid user name or password" in error_msg:
+            logging.error(f"Ошибка авторизации на устройстве {device_config['name']}. Проверьте учётные данные (логин, пароль).")
+        else:
+            logging.error(f"Ошибка связи с устройством {device_config['name']}: {e}")
+        return None
 
     except RouterOsApiConnectionError as e:
         logging.warning(f"Ошибка подключения: {e}")
