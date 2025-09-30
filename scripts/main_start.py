@@ -298,7 +298,7 @@ class ProjectOrchestrator:
             email_cfg = self.notify_config['email']
             logger.debug(f"Конфиг email: {email_cfg}")
 
-            subject = "❌ MikroTik-ARMA - Failure" if is_error else "✅ MikroTik-ARMA - Success"
+            subject = "❌ MikroTik-ARMA: Failure" if is_error else "✅ MikroTik-ARMA: Success"
             logger.debug(f"Тема письма: {subject}")
 
             msg = MIMEText(message, 'plain', 'utf-8')
@@ -378,6 +378,107 @@ class ProjectOrchestrator:
         cache_config = self.config.get('settings_cache', {}).get(script_category, {})
         return cache_config.get(base_name, 'false')
 
+    def setup_log_monitoring(self) -> None:
+        """Настройка мониторинга логов по шаблонам"""
+        log_monitoring_config = self.config.get('log_monitoring', {})
+        if not log_monitoring_config.get('enabled', False):
+            logger.info(f"Мониторинг логов отключен")
+            return
+
+        self.log_patterns = log_monitoring_config.get('pattern_alerts', [])
+        if self.log_patterns:
+            logger.info(f"Мониторинг логов активен. Шаблоны: {len(self.log_patterns)}")
+
+    def check_log_patterns(self, line: str, script_category: str, script_name: str) -> None:
+        """Проверяет строку лога на совпадение с шаблонами"""
+        if not hasattr(self, 'log_patterns') or not self.log_patterns:
+            return
+
+        for pattern in self.log_patterns:
+            if pattern in line:
+                self.send_log_alert(pattern, line, script_category, script_name)
+                break  # Отправляем одно уведомление на строку
+
+    def send_log_alert(self, pattern: str, line: str, script_category: str, script_name: str) -> None:
+        """Отправляет уведомление о найденном шаблоне в логах (тип WARNING)"""
+        message = (f"Обнаружен шаблон в логах скрипта {script_category}/{script_name}\n"
+                  f"Шаблон: {pattern}\n"
+                  f"Строка лога: {line.strip()}")
+
+        logger.warning(f"Мониторинг логов: {message}")
+
+        self.send_log_monitoring_notification(message)
+
+    def send_log_monitoring_notification(self, message: str) -> None:
+        """Отправляет уведомление от мониторинга логов (отдельный тип)"""
+        if self.config.get('settings_notify', {}).get('telegram', 'false').lower() == 'true':
+            self._send_telegram_log_monitoring(message)
+
+        if self.config.get('settings_notify', {}).get('email', 'false').lower() == 'true':
+            self._send_email_log_monitoring(message)
+
+    def _send_telegram_log_monitoring(self, message: str) -> None:
+        """Отправка в Telegram от мониторинга логов"""
+        if not self.notify_config.get('telegram'):
+            logger.error("Telegram конфиг не найден в notify.yaml")
+            return
+
+        try:
+            import requests
+            url = f"https://api.telegram.org/bot{self.notify_config['telegram']['bot_token']}/sendMessage"
+            payload = {
+                'chat_id': self.notify_config['telegram']['chat_id'],
+                'text': f"⚠️ <b>MikroTik-ARMA: Log Monitor</b>: <i>{message}</i>",
+                'parse_mode': 'HTML'
+            }
+            response = requests.post(url, json=payload, timeout=10)
+            response.raise_for_status()
+            logger.debug(f"Telegram Log Monitor отправлен: {response.status_code}")
+
+        except Exception as e:
+            logger.error(f"Ошибка отправки Telegram для мониторинга логов: {str(e)}")
+
+    def _send_email_log_monitoring(self, message: str) -> None:
+        """Отправка email от мониторинга логов"""
+        logger.debug("Отправка email для мониторинга логов...")
+
+        if not self.notify_config.get('email'):
+            logger.error("Email конфиг не найден в notify.yaml")
+            return
+
+        try:
+            import smtplib
+            from email.mime.text import MIMEText
+            from email.utils import formatdate
+
+            email_cfg = self.notify_config['email']
+
+            # Отдельная тема для мониторинга логов
+            subject = "⚠️ MikroTik-ARMA - Log Monitoring Alert"
+
+            msg = MIMEText(message, 'plain', 'utf-8')
+            msg['Subject'] = subject
+            msg['From'] = email_cfg['from_addr']
+            msg['To'] = email_cfg['to_addr']
+            msg['Date'] = formatdate(localtime=True)
+
+            with smtplib.SMTP_SSL(
+                host=email_cfg['smtp_server'],
+                port=email_cfg['smtp_port'],
+                timeout=10
+            ) as server:
+                server.login(email_cfg['login'], email_cfg['password'])
+                server.sendmail(
+                    email_cfg['from_addr'],
+                    [email_cfg['to_addr']],
+                    msg.as_string()
+                )
+
+            logger.info(f"Email для мониторинга логов отправлен на {email_cfg['to_addr']}")
+
+        except Exception as e:
+            logger.error(f"Ошибка отправки email для мониторинга логов: {str(e)}")
+
     def run_script(self, script_category: str, script_name: str, base_name: str) -> bool:
         """Запуск отдельного скрипта с учётом категории"""
         if getattr(self, '_shutdown_requested', False):
@@ -393,19 +494,42 @@ class ProjectOrchestrator:
             logger.info(f"[START] Запуск {script_category}/{script_name}...")
             start_time = time.time()
 
-            subprocess.run(
+            # Запуск процесса с отдельным выводом
+            process = subprocess.Popen(
                 [sys.executable, str(script_path)],
                 cwd=self.base_dir,
-                check=True
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding='utf-8',
+                bufsize=1
             )
 
-            exec_time = time.time() - start_time
-            logger.info(f"[DONE] Скрипт {script_category}/{script_name} успешно выполнен за {exec_time:.1f} сек")
-            return True
+            # Читает вывод скрипта в реальном времени
+            output_lines = []
+            while True:
+                line = process.stdout.readline()
+                if not line and process.poll() is not None:
+                    break
+                if line:
+                    line = line.strip()
+                    if line:
+                        print(line)
+                        output_lines.append(line)
 
-        except subprocess.CalledProcessError as e:
-            logger.error(f"[FAIL] Скрипт {script_category}/{script_name} завершился с ошибкой (код {e.returncode})")
-            return False
+                        # Проверка шаблонов ТОЛЬКО в логах внешнего скрипта
+                        self.check_log_patterns(line, script_category, script_name)
+
+            process.wait()
+            exec_time = time.time() - start_time
+
+            if process.returncode == 0:
+                logger.info(f"[DONE] Скрипт {script_category}/{script_name} успешно выполнен за {exec_time:.1f} сек")
+                return True
+            else:
+                logger.error(f"[FAIL] Скрипт {script_category}/{script_name} завершился с ошибкой (код {process.returncode})")
+                return False
+
         except Exception as e:
             logger.error(f"[ERROR] Неожиданная ошибка в {script_category}/{script_name}: {str(e)}")
             return False
@@ -436,6 +560,9 @@ class ProjectOrchestrator:
         ]):
             self.send_notification("Ошибка инициализации!", True)
             sys.exit(1)
+
+        # Настройка мониторинга логов
+        self.setup_log_monitoring()
 
         # Заполняет список additional скриптов на основе configs/config.yaml
         self.script_categories['additional'] = self._discover_additional_scripts()
