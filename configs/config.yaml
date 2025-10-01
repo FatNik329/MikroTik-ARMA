@@ -19,6 +19,7 @@ main_start:
     additional:                              ## Дополнительный функционал системы
       ip_analyst: false                        ### Запускать группу скриптов ip_analyst-*.py (True/False)
       get_IP_Connections: false                ### Запускать группу скриптов get_IP_Connections-*.py (True/False)
+      backup_Mikrotik: false
     maintenance:                             ## Обслуживающий функционал системы
       logs_rotate: true                      ### Запускать скрипт logs_rotate.py (True/False)
 
@@ -32,6 +33,7 @@ main_start:
     additional:                              ## Актуальность запусков дополнительного функционала
       ip_analyst: "1d"
       get_IP_Connections: "20m"
+      backup_Mikrotik: "12h"
     maintenance:                             ## Актуальность запусков обслуживающего функционала
       logs_rotate: "false"                   ### Отключен - запуск без ограничений
 
@@ -44,9 +46,11 @@ main_start:
   scripts_discovery:                   # Секция расширения функционала Additional
     additional:
       patterns:                        # Паттерн масок скриптов (влияет на очередность исполнения)
-        - "get_IP_Connections-*.py"    # Группа выполнится 1-й
-        - "ip_analyst-*.py"            # Группа выполнится 2-й
+        - "backup_Mikrotik-*.py"       # Группа выполнится 1-й
+        - "get_IP_Connections-*.py"    # Группа выполнится 2-й
+        - "ip_analyst-*.py"            # Группа выполнится 3-й
       base_name_patterns:
+        backup_Mikrotik: "^backup_Mikrotik"
         get_IP_Connections: "^get_IP_Connections"
         ip_analyst: "^ip_analyst"
 
