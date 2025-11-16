@@ -6,8 +6,8 @@
 # ====================================
 main_start:
 
-  logging:                                   # Настройки логирования
-    log_level: "INFO"                        ## Уровень детализации логов: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  logging:                          # Настройки логирования
+    log_level: "INFO"               # Уровень детализации логов: DEBUG, INFO, WARNING, ERROR, CRITICAL
 
   launch_chain:                              # Настройки цепочки запусков скриптов
     base:                                    ## Основной функционал системы
@@ -19,29 +19,49 @@ main_start:
     additional:                              ## Дополнительный функционал системы
       ip_analyst: false                        ### Запускать группу скриптов ip_analyst-*.py (True/False)
       get_IP_Connections: false                ### Запускать группу скриптов get_IP_Connections-*.py (True/False)
-      backup_Mikrotik: false
+      filter_results_dns: false                ### Запускать группу скриптов filter_results_dns-*.py (True/False)
+      backup_Mikrotik: false                   ### Запускать группу скриптов backup_Mikrotik.py (True/False)
+      lm_sensors: false                        ### Запускать группу скриптов lm_sensors-*.py (True/False)
+      tld_parser: false                        ### Запускать группу скриптов tld_parser.py (True/False)
     maintenance:                             ## Обслуживающий функционал системы
-      logs_rotate: true                      ### Запускать скрипт logs_rotate.py (True/False)
+      logs_rotate: false                      ### Запускать скрипт logs_rotate.py (True/False)
 
   settings_cache:                            # Раздел настроек кэша актуальности скриптов. Допустимые параметры (m/h/d/false - минуты/часы/дни/отключен)
     base:                                    ## Актуальность запусков основного функционала
-      dns_fwd: "55m"
+      dns_fwd: "3h"
       fetch_as_prefixes: "1d"
       converter_addressLists: "1h"
-      sync_master: "7d"
-      sync_slave: "8d"
+      sync_master: "9d"
+      sync_slave: "10d"
     additional:                              ## Актуальность запусков дополнительного функционала
-      ip_analyst: "1d"
-      get_IP_Connections: "20m"
-      backup_Mikrotik: "12h"
+      ip_analyst: "1h"
+      get_IP_Connections: "5m"
+      filter_results_dns: "3h"
+      backup_Mikrotik: "1h"
+      lm_sensors: "false"
+      tld_parser: "1d"
     maintenance:                             ## Актуальность запусков обслуживающего функционала
       logs_rotate: "false"                   ### Отключен - запуск без ограничений
 
-  settings_notify:                           # Основные настройки уведомлений (работают и для мониторинга логов)
-   type: "failure"                           # Тип уведомлений оркестратора (all - все, failure - провалы, success - успех)
-   telegram: "false"                          # Включить отправку уведомлений в Telegram (true/false)
-   email: "false"                             # Включить отправку уведомлений на Email (true/false)
-   stop_on_error: "false"                    # Поведение при ошибке (остановить весь пайплайн - false, или продолжить - true).
+  settings_notify:       # Раздел настроек уведомлений скрипта
+   type: "failure"       # Тип уведомлений (all - все, failure - провалы, success - успех)
+   telegram: "true"      # Включить отправку уведомлений в Telegram
+   email: "true"         # Включить отправку уведомлений на Email
+   stop_on_error: "false" # Поведение при ошибке (остановить весь пайплайн или продолжить).
+
+  log_monitoring:               # Раздел настроек для мониторинга логов скриптов
+    enabled: true               # Активировать мониторинг логов
+    pattern_alerts:             # Шаблоны по которым будут отправляться уведомления (не реагирует на логи самого оркестратора - main_start.py)
+      - "Бэкап невалиден"
+      - "Ошибка авторизации"
+      - "Ошибка при подключении"
+      - "SSH ошибка"
+      - "Ошибка создания .rsc файла"
+      - "превышение °C"
+      - "Ошибка сети"
+      - "Ошибка парсинга"
+      - "ошибка от API"
+      - "tld_parser завершил работу с ошибками"
 
   scripts_discovery:                   # Секция расширения функционала Additional
     additional:
@@ -49,18 +69,16 @@ main_start:
         - "backup_Mikrotik-*.py"       # Группа выполнится 1-й
         - "get_IP_Connections-*.py"    # Группа выполнится 2-й
         - "ip_analyst-*.py"            # Группа выполнится 3-й
+        - "lm_sensors-*.py"
+        - "filter_results_dns-*.py"
+        - "tld_parser.py"
       base_name_patterns:
         backup_Mikrotik: "^backup_Mikrotik"
+        lm_sensors: "^lm_sensors"
         get_IP_Connections: "^get_IP_Connections"
         ip_analyst: "^ip_analyst"
-
-  log_monitoring:               # Раздел настроек для мониторинга логов скриптов
-    enabled: true               # Включить/выключить мониторинг
-    pattern_alerts:             # Шаблоны по которым будут отправляться уведомления (не реагирует на логи самого оркестратора - main_start.py)
-      - "Бэкап невалиден"       # Простой текст для поиска
-      - "Ошибка авторизации"
-      - "Ошибка при подключении"
-      - "SSH ошибка"
+        filter_results_dns: "^filter_results_dns"
+        tld_parser: "^tld_parser"
 
 # Настройки скрипта dns_fwd.py
 # ============================
