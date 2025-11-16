@@ -454,7 +454,7 @@ class ProjectOrchestrator:
             email_cfg = self.notify_config['email']
 
             # Отдельная тема для мониторинга логов
-            subject = "⚠️ MikroTik-ARMA - Log Monitoring Alert"
+            subject = "⚠️ MikroTik-ARMA: Log Monitoring Alert"
 
             msg = MIMEText(message, 'plain', 'utf-8')
             msg['Subject'] = subject
