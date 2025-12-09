@@ -71,7 +71,6 @@ def get_paths(list_name):
         "as_list": Path(f"configs/AddressLists/{list_name}/AS/as_list.json5"),
         "cache_dir": Path(f"cache/fetch_as/{list_name}"),
         "output": Path(f"raw-data/{list_name}/AS"),
-        "bgpview_cache": Path(f"cache/fetch_as/{list_name}/bgpview_cache.json"),
         "ripe_cache": Path(f"cache/fetch_as/{list_name}/ripe_cache.json"),
         "bgptools_cache": Path(f"cache/fetch_as/{list_name}/bgptools_cache.json"),
         "raw_data": Path(f"raw-data/{list_name}/AS/results-as.json")
@@ -153,43 +152,6 @@ def fetch_api(asn: str, cache_file: Path, url: str, api_name: str, config, **kwa
         time.sleep(config['settings_api']['delay'] * (attempt + 1))
 
     return [] # Возвращение пустого списка, если все попытки неудачны
-
-def fetch_bgpview(asn: str, cache_file: Path, config, **kwargs) -> list:
-    """Получает префиксы через BGPView API."""
-    url_template = config.get('url_service', {}).get('bgp_view', "https://api.bgpview.io/asn/{asn}/prefixes")
-    url = url_template.format(asn=asn[2:])  # Удаление "AS" из номера
-
-    def parse_bgpview(data: dict, config: dict) -> list:
-        """Парсит ответ от BGPView API"""
-        try:
-            if data["status"] == "error":
-                logging.error(f"BGPView вернул ошибку: {data.get('status_message', 'Неизвестная ошибка')}")
-                return []  # Возвращает пустой список при ошибке
-
-            prefixes = []
-            # IPv4 префиксы
-            if config['ip_type']['ipv4']:
-                prefixes.extend(p["prefix"] for p in data["data"].get("ipv4_prefixes", []))
-            # IPv6 префиксы
-            if config['ip_type']['ipv6']:
-                prefixes.extend(p["prefix"] for p in data["data"].get("ipv6_prefixes", []))
-
-            if not prefixes:
-                logging.warning("BGPView вернул пустой список префиксов")
-            return prefixes
-        except (KeyError, TypeError) as e:
-            logging.error(f"Ошибка парсинга ответа BGPView: {e}. Данные: {data}")
-            return []
-
-    return fetch_api(
-        asn=asn,
-        cache_file=cache_file,
-        url=url,
-        api_name="BGPView",
-        parser_func=lambda data: parse_bgpview(data, config),
-        config=config,
-        **kwargs
-    )
 
 def fetch_ripe_stat(asn: str, cache_file: Path, config, **kwargs) -> list:
     """Получает префиксы через RIPE Stat API."""
@@ -381,15 +343,10 @@ def process_list(list_name, config):
         need_data = config['ip_type']['ipv4'] or config['ip_type']['ipv6']
 
         # Получение порядка источников загрузки из общего конфига
-        source_order = config.get('source_priority', ['bgpview', 'ripe_stat', 'bgp_tools'])
+        source_order = config.get('source_priority', ['ripe_stat', 'bgp_tools'])
 
         # Сопоставление имен источников из конфига
         source_dispatcher = {
-            'bgpview': {
-                'fetch_func': fetch_bgpview,
-                'cache_file': paths["bgpview_cache"],
-                'source_name': 'bgpview'
-            },
             'ripe_stat': {
                 'fetch_func': fetch_ripe_stat,
                 'cache_file': paths["ripe_cache"],
@@ -443,8 +400,6 @@ def process_list(list_name, config):
 
     # Обновление источников в метаданных
     used_sources = set()
-    if any("bgpview" in asn_data.get("sources", []) for asn_data in results["as_data"].values()):
-        used_sources.add("bgpview")
     if any("ripe_stat" in asn_data.get("sources", []) for asn_data in results["as_data"].values()):
         used_sources.add("ripe_stat")
     if any("bgp_tools" in asn_data.get("sources", []) for asn_data in results["as_data"].values()):
