@@ -23,6 +23,7 @@ main_start:
       backup_Mikrotik: false                   ### Запускать группу скриптов backup_Mikrotik.py (True/False)
       lm_sensors: false                        ### Запускать группу скриптов lm_sensors-*.py (True/False)
       tld_parser: false                        ### Запускать группу скриптов tld_parser.py (True/False)
+      get_asn_mmdb: false                      ### Запускать группу скриптов get_asn_mmdb.py (True/False)
     maintenance:                             ## Обслуживающий функционал системы
       logs_rotate: false                      ### Запускать скрипт logs_rotate.py (True/False)
 
@@ -40,6 +41,7 @@ main_start:
       backup_Mikrotik: "1h"
       lm_sensors: "false"
       tld_parser: "1d"
+      get_asn_mmdb: "14d"
     maintenance:                             ## Актуальность запусков обслуживающего функционала
       logs_rotate: "false"                   ### Отключен - запуск без ограничений
 
@@ -62,6 +64,9 @@ main_start:
       - "Ошибка парсинга"
       - "ошибка от API"
       - "tld_parser завершил работу с ошибками"
+      - "ASN MMDB файл не найден"
+      - "Ошибка скачивания MMDB - IPLocate"
+      - "Проверка структуры не пройдена"
 
   scripts_discovery:                   # Секция расширения функционала Additional
     additional:
@@ -69,9 +74,10 @@ main_start:
         - "backup_Mikrotik-*.py"       # Группа выполнится 1-й
         - "get_IP_Connections-*.py"    # Группа выполнится 2-й
         - "ip_analyst-*.py"            # Группа выполнится 3-й
-        - "lm_sensors-*.py"
+        - "lm_sensors-*.py"            # ...
         - "filter_results_dns-*.py"
         - "tld_parser.py"
+        - "get_asn_mmdb.py"
       base_name_patterns:
         backup_Mikrotik: "^backup_Mikrotik"
         lm_sensors: "^lm_sensors"
@@ -79,6 +85,7 @@ main_start:
         ip_analyst: "^ip_analyst"
         filter_results_dns: "^filter_results_dns"
         tld_parser: "^tld_parser"
+        get_asn_mmdb: "^get_asn_mmdb"
 
 # Настройки скрипта dns_fwd.py
 # ============================
