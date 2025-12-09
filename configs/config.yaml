@@ -125,11 +125,9 @@ fetch_as_prefixes:
 
   source_priority:          # Настройка приоритетов внеших источников
     - "ripe_stat"           ## Первый приоритет
-    - "bgpview"             ## Второй приоритет
     - "bgp_tools"           ## Третий приоритет
 
   url_service:              # URL внешних сервисов для получения префиксов
-    bgp_view: "https://api.bgpview.io/asn/{asn}/prefixes"
     ripe_stat: "https://stat.ripe.net/data/announced-prefixes/data.json?resource={asn}"
     bgp_tools: "https://bgp.tools/table.txt"
 
@@ -139,7 +137,7 @@ fetch_as_prefixes:
 
   storage_raw_data:         # Настройки хранения необработанных данных
     backup_files: 3         ## Количество хранимых бэкапов (по умолчанию 3)
-
+    
 # Настройки скрипта converter_addressLists.py
 # ===========================================
 converter_add_list:
