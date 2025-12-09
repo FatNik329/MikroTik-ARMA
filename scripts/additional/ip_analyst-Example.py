@@ -3,28 +3,30 @@ import json
 import logging
 import os
 import yaml
+import maxminddb
 from pathlib import Path
 from collections import defaultdict
-from typing import List, Dict, Set, Optional, Tuple
+from typing import List, Dict, Set, Optional, Tuple, Any
 from datetime import datetime, timedelta
 
 # Настройки скрипта
 CONFIG = {
     # Пути к файлам
-    'ip_list_dir': 'raw-data/list-IPServices',                          # Директория с исходными IP-адресами
-    'dns_file_filter': 'none',               # Файл с DNS записями (исключает совпадения). Опциональный параметр, для отключения 'none'. Для включения указать путь до файла results-dns.yaml '/path/to/results-dns.yaml'
-    'asn_file_filter': 'raw-data/list-PrefixAS/AS/results-as.json',       # Файл с ASN префиксами
-    'output_dir': 'output-data/list-IPServices/Custom',                 # Кастомная директория для сохранения .rsc файла
+    'ip_list_dir': 'raw-data/list-IPServices',             # Директория с исходными IP-адресами. На основании имени директории формируется имя выходного RSC файла.
+    'dns_file_filter': 'none',                             # Файл с DNS записями (исключает совпадения). Опциональный параметр, для отключения 'none'. Для включения указать путь до файла results-dns.yaml '/path/to/results-dns.yaml'
+    'asn_db_file': 'raw-data/ASN-db/ip-to-asn.mmdb',       # Файл MMDB база - IPLocate
+    'output_dir': 'output-data/list-IPServices/Custom',    # Кастомная директория для сохранения .rsc файла
 
     # Дополнительные параметры и фильтры
-    'prefix_threshold': 3,  # Минимальное количество IP в префиксе для его добавления
-    'asn_filter': ['AS12345', 'AS23456', 'AS34567'],  # Пример: определённые ASN ['AS12345', 'AS23456']. Без фильтрации: None
-    'remove_last_seen': 7,  # Исключать IP, которые не появлялись более N дней (поддерживает ТОЛЬКО дни). Без фильтрации: None
+    'prefix_threshold': 2,  # Минимальное количество IP в префиксе для его добавления
+    'asn_filter': 'none',  # Пример: определённые ASN ['AS8075', 'AS15169', 'AS32934']. Без фильтрации: one
+    'country_filter': 'none', # Пример: фильтрация на основе кода страны ['US', 'FR', 'RU', ...]. Без фильтраации: none
+    'remove_last_seen': 20,  # Исключать IP, которые не появлялись более N дней (поддерживает ТОЛЬКО целые числа - дни). Без фильтрации: None
 }
 
 # Автоматическое определение имени лог файла
 # Получение имени скрипта без расширения .py
-script_name = Path(__file__).stem  # Например: "ip_analyst-list-IPServices"
+script_name = Path(__file__).stem
 log_filename = f"{script_name}.log"
 
 # Создание директории в logs (автоматическое имя из названия скрипта)
@@ -145,34 +147,6 @@ def load_ip_lists_from_dir(dir_path: str) -> Tuple[str, Set[str]]:
         logging.error(f"Ошибка загрузки IP-списков из директории: {e}")
         raise
 
-def filter_as_data(as_data: Dict[str, List[ipaddress.IPv4Network]],
-                  asn_filter: Optional[List[str]]) -> Dict[str, List[ipaddress.IPv4Network]]:
-    """
-    Фильтрует данные AS по заданному списку ASN номеров.
-    Если asn_filter is None - возвращает исходные данные без фильтрации.
-    """
-    if asn_filter is None:
-        return as_data
-
-    filtered_data = {}
-    missing_asns = set(asn_filter)  # Проверка отсутствующих ASN
-
-    for asn in asn_filter:
-        if asn in as_data:
-            filtered_data[asn] = as_data[asn]
-            missing_asns.discard(asn)
-        else:
-            logging.warning(f"ASN {asn} из фильтра не найдена в данных AS")
-
-    if missing_asns:
-        logging.warning(f"Следующие ASN из фильтра отсутствуют в данных: {sorted(missing_asns)}")
-
-    if not filtered_data:
-        raise ValueError("Ни одна ASN из фильтра не найдена в данных. Проверьте настройки.")
-
-    logging.info(f"Применён фильтр ASN: осталось {len(filtered_data)} AS из {len(asn_filter)} запрошенных")
-    return filtered_data
-
 def load_dns_ips(file_path: str) -> Set[str]:
     """Загружает все IPv4 адреса из YAML файла с DNS записями (новая структура)"""
     if file_path.lower() == 'none':
@@ -207,7 +181,7 @@ def load_dns_ips(file_path: str) -> Set[str]:
         logging.info(f"Всего загружено DNS IP-адресов из historical: {total_loaded}")
         logging.info(f"Уникальных DNS IP-адресов: {len(ip_set)}")
 
-        # Примеры загруженных IP
+        # Дополнительная диагностика - примеры загруженных IP
         if ip_set:
             sample_ips = list(ip_set)[:5]
             logging.debug(f"Примеры загруженных DNS IP: {sample_ips}")
@@ -218,160 +192,198 @@ def load_dns_ips(file_path: str) -> Set[str]:
         logging.error(f"Ошибка загрузки DNS YAML файла: {e}")
         raise
 
-def prepare_as_data(as_data: Dict[str, List[str]]) -> Dict[str, List[ipaddress.IPv4Network]]:
-    """Подготавливает данные AS: преобразует префиксы в IPv4Network и сортирует"""
-    prepared = {}
-    for asn, prefixes in as_data.items():
-        # Конвертирорование и сортировка префиксов по длине маски (от больших к меньшим)
-        networks = []
-        for prefix in prefixes:
-            try:
-                networks.append(ipaddress.IPv4Network(prefix, strict=False))
-            except ValueError as e:
-                logging.warning(f"Неверный префикс {prefix} в AS {asn}: {e}")
-
-        # Сортировка по длине префикса (от /32 к /0)
-        networks.sort(key=lambda x: x.prefixlen, reverse=True)
-        prepared[asn] = networks
-
-    return prepared
-
-def load_as_prefixes(file_path: str, asn_filter: Optional[List[str]] = None) -> Dict[str, List[ipaddress.IPv4Network]]:
-    """Загружает и подготавливает префиксы AS из JSON файла с опциональной фильтрацией"""
+def load_asn_mmdb(file_path: str) -> maxminddb.Reader:
+    """Загружает MMDB базу данных ASN"""
     try:
-        abs_path = validate_file_path(file_path, "AS JSON файл")
-        with open(abs_path, 'r') as f:
-            data = json.load(f)
-
-        as_data = {}
-        for asn, as_info in data.get('as_data', {}).items():
-            prefixes = as_info.get('prefixes_v4', [])
-            if prefixes:
-                as_data[asn] = prefixes
-
-        # Подготавливает данные (конвертируем в IPv4Network)
-        prepared_data = prepare_as_data(as_data)
-
-        # Применят фильтр если указан
-        if asn_filter is not None:
-            prepared_data = filter_as_data(prepared_data, asn_filter)
-
-        return prepared_data
-
+        abs_path = validate_file_path(file_path, "ASN MMDB файл")
+        reader = maxminddb.open_database(abs_path)
+        logging.info(f"MMDB база ASN загружена: {abs_path}")
+        return reader
     except Exception as e:
-        logging.error(f"Ошибка загрузки AS JSON файла: {e}")
+        logging.error(f"Ошибка загрузки MMDB файла: {e}")
         raise
 
-def find_matching_asn(ip: str, as_data: Dict[str, List[ipaddress.IPv4Network]]) -> Optional[Tuple[str, ipaddress.IPv4Network]]:
-    """Находит ASN и префикс для заданного IP-адреса"""
+def get_asn_info(ip: str, mmdb_reader: maxminddb.Reader) -> Optional[Dict[str, Any]]:
+    """
+    Получает информацию об ASN для IP из MMDB базы.
+    Возвращает словарь с ключами: 'asn', 'org', 'country'
+    """
     try:
         ip_obj = ipaddress.IPv4Address(ip)
+        if ip_obj.is_private:
+            # Для приватных IP возвращает метку
+            return {
+                'asn': 'ASPRIVATE',
+                'org': 'Private Network',
+                'country': 'XX'
+            }
 
-        for asn, networks in as_data.items():
-            for network in networks:
-                if ip_obj in network:
-                    return (asn, network)
+        # Запрос к MMDB базе
+        result = mmdb_reader.get(ip_obj.compressed)
 
-        return None
+        if not result:
+            # Если в MMDB не нашлась информация
+            logging.debug(f"Для публичного IP {ip} не найдена информация в MMDB")
+            return {
+                'asn': 'ASUNKNOWN',
+                'org': 'Unknown',
+                'country': 'XX'
+            }
+
+        # Ключи для ip-to-asn.mmdb
+        asn_info = {
+            'asn': result.get('asn', 'ASUNKNOWN'),
+            'org': result.get('org', 'Unknown'),
+            'country': result.get('country_code', 'XX')
+        }
+
+        # Если ASN не начинается с "AS", добавляет префикс
+        if asn_info['asn'] != 'ASUNKNOWN' and not asn_info['asn'].startswith('AS'):
+            asn_info['asn'] = f"AS{asn_info['asn']}"
+
+        # Форматирование названия организации
+        if ',' in asn_info['org']:
+            asn_info['org'] = asn_info['org'].split(',')[0]
+
+        return asn_info
+
     except Exception as e:
-        logging.error(f"Ошибка проверки IP {ip} в AS префиксах: {e}")
-        return None
+        logging.debug(f"Ошибка получения ASN для IP {ip}: {e}")
+        return {
+            'asn': 'ASUNKNOWN',
+            'org': 'Unknown',
+            'country': 'XX'
+        }
 
-def process_ips(ips: List[str],
-                as_data: Dict[str, List[ipaddress.IPv4Network]],
-                asn_filter: Optional[List[str]] = None) -> Tuple[Dict[Tuple[str, ipaddress.IPv4Network], List[str]], List[str]]:
+def process_ips_with_mmdb(
+    ips: List[str],
+    mmdb_reader: maxminddb.Reader,
+    asn_filter: Optional[List[str]] = None,
+    country_filter: Optional[List[str]] = None
+) -> Tuple[Dict[Tuple[str, str, str], Dict[str, Any]], List[str]]:
     """
-    Обрабатывает IP-адреса, возвращает:
-    - словарь {(asn, префикс): [список IP]}
-    - список IP без найденных префиксов (только если фильтр отключен)
+    Обрабатывает IP-адреса с использованием MMDB базы.
+    Возвращает:
+    - словарь {(asn, org, country): {'prefixes': Dict[префикс: List[IP]], 'total_ips': int}}
+    - список IP без найденной ASN информации
     """
-    prefix_ip_map = defaultdict(list)
-    no_prefix_ips = []
-    filtered_count = 0
+    asn_group_map = defaultdict(lambda: {'prefixes': defaultdict(list), 'total_ips': 0})
+    no_asn_ips = []
 
     for ip in ips:
-        match = find_matching_asn(ip, as_data)
-        if match:
-            asn, prefix = match
-            # Если фильтр активен, добавляем IP только если ASN в фильтре
-            if asn_filter is None or asn in asn_filter:
-                prefix_ip_map[(asn, prefix)].append(ip)
-            # Если фильтр активен и ASN не в фильтре - пропускает этот IP
-            else:
+        asn_info = get_asn_info(ip, mmdb_reader)
+
+        if not isinstance(asn_info, dict):
+            no_asn_ips.append(ip)
+            continue
+
+        # Применяет фильтры
+        asn = asn_info['asn']
+        country = asn_info['country']
+
+        # Включен фильтр ASN
+        if asn_filter:
+            if asn not in asn_filter:
                 continue
-        else:
-            # IP без префиксов добавляет только если фильтр отключен
-            if asn_filter is None:
-                no_prefix_ips.append(ip)
 
-    if asn_filter is not None and filtered_count > 0:
-        logging.info(f"Отфильтровано {filtered_count} IP, не принадлежащих указанным ASN")
+        # Включен фильтр по стране
+        if country_filter:
+            if country not in country_filter:
+                continue
 
-    return prefix_ip_map, no_prefix_ips
+        # Определяем префикс (/24 для IPv4)
+        ip_obj = ipaddress.IPv4Address(ip)
+        prefix = ipaddress.IPv4Network(f"{ip_obj}/24", strict=False)
 
-def generate_rsc_content(prefix_ip_map: Dict[Tuple[str, ipaddress.IPv4Network], List[str]],
-                        no_prefix_ips: List[str],
-                        list_name: str) -> str:
+        # Группируем по ASN, Org, Country
+        key = (asn_info['asn'], asn_info['org'], asn_info['country'])
+        asn_group_map[key]['prefixes'][prefix].append(ip)
+        asn_group_map[key]['total_ips'] += 1
+
+    return dict(asn_group_map), no_asn_ips
+
+def generate_rsc_content_mmdb(
+    asn_group_map: Dict[Tuple[str, str, str], Dict[str, Any]],
+    no_asn_ips: List[str],
+    list_name: str
+) -> str:
     """Генерирует содержимое .rsc файла"""
     lines = ['/ip firewall address-list']
     threshold = CONFIG['prefix_threshold']
 
-    # Добавляет префиксы, которые встречаются >= threshold раз
-    for (asn, prefix), ips in prefix_ip_map.items():
-        if len(ips) >= threshold:
-            lines.append(
-                f'add address={prefix} list={list_name} '
-                f'comment="{asn} -> IP={len(ips)}"'
-            )
-        else:
-            for ip in ips:
-                lines.append(
-                    f'add address={ip} list={list_name} '
-                    f'comment="{asn} -> {prefix}"'
-                )
+    # Функция для проверки приватных адресов
+    def is_private_ip(ip_str: str) -> bool:
+        try:
+            ip = ipaddress.IPv4Address(ip_str)
+            return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved
+        except:
+            return True
 
-    # Добавляет IP без префиксов
-    for ip in no_prefix_ips:
-        lines.append(f'add address={ip} list={list_name}')
+    # Обрабатываем IP с ASN информацией
+    for (asn, org, country), data in asn_group_map.items():
+        comment_base = f"{asn}:{org}:{country}"
+
+        for prefix, ips in data['prefixes'].items():
+            if len(ips) >= threshold:
+                # Добавляем префикс
+                lines.append(
+                    f'add address={prefix} list={list_name} '
+                    f'comment="{comment_base} -> IP={len(ips)}"'
+                )
+            else:
+                # Добавляем отдельные IP
+                for ip in ips:
+                    lines.append(
+                        f'add address={ip} list={list_name} '
+                        f'comment="{comment_base} -> {prefix}"'
+                    )
+
+    private_ip_count = 0
+    for ip in no_asn_ips:
+        if not is_private_ip(ip):
+            lines.append(f'add address={ip} list={list_name}')
+        else:
+            private_ip_count += 1
+
+    if private_ip_count > 0:
+        logging.info(f"Отфильтровано приватных адресов без ASN: {private_ip_count}")
 
     return '\n'.join(lines)
 
-def generate_rsc_file(prefix_ip_map: Dict[Tuple[str, ipaddress.IPv4Network], List[str]],
-                     no_prefix_ips: List[str],
-                     output_path: str,
-                     list_name: str):
-    """Генерирует .rsc файл для MikroTik"""
-    try:
-        output_dir = os.path.dirname(output_path)
-        validate_directory(output_dir, "Выходная директория")
-
-        content = generate_rsc_content(prefix_ip_map, no_prefix_ips, list_name)
-
-        with open(output_path, 'w') as f:
-            f.write(content)
-
-        logging.info(f"Файл {output_path} успешно создан")
-    except Exception as e:
-        logging.error(f"Ошибка создания .rsc файла: {e}")
-        raise
-
 def main():
-    logging.info("\n=== Запуск %s - генератор RSC с фильтрацией ===", script_name)
+    logging.info("\n=== Запуск %s - генератор RSC из MMDB ASN ===", script_name)
+
+    #logging.getLogger().setLevel(logging.DEBUG)
 
     try:
         # Валидация путей
         ip_list_dir = CONFIG['ip_list_dir']
         dns_yaml_path = CONFIG['dns_file_filter']
-        as_json_path = CONFIG['asn_file_filter']
+        as_mmdb_path = CONFIG['asn_db_file']
         output_dir = CONFIG['output_dir']
         remove_last_seen = CONFIG.get('remove_last_seen')
+        country_filter = CONFIG.get('country_filter')
+
+        # ПРЕОБРАЗОВАНИЕ ПАРАМЕТРОВ:
+        asn_filter = CONFIG.get('asn_filter')
+        if isinstance(asn_filter, str) and asn_filter.lower() == 'none':
+            asn_filter = None
+        elif isinstance(asn_filter, list) and len(asn_filter) == 0:
+            asn_filter = None
+
+        country_filter = CONFIG.get('country_filter')
+        if isinstance(country_filter, str) and country_filter.lower() == 'none':
+            country_filter = None
+        elif isinstance(country_filter, list) and len(country_filter) == 0:
+            country_filter = None
 
         logging.info(f"Используемые пути и параметры:\n"
                     f"- Директория с IP списками: {ip_list_dir}\n"
                     f"- DNS фильтр (исключает адреса): {'Отключен' if dns_yaml_path.lower() == 'none' else dns_yaml_path}\n"
-                    f"- ASN фильтр (входящие префиксы): {as_json_path}\n"
+                    f"- ASN MMDB база: {as_mmdb_path}\n"
                     f"- Выходная директория данных: {output_dir}\n"
-                    f"- Фильтр ASN: {CONFIG.get('asn_filter', 'Отключен')}\n"
+                    f"- Фильтр ASN: {asn_filter if asn_filter else 'Отключен'}\n"
+                    f"- Фильтр стран: {country_filter if country_filter else 'Отключен'}\n"
                     f"- Фильтр по времени: {f'{remove_last_seen} дней' if remove_last_seen is not None else 'Отключен'}")
 
         # Загрузка данных
@@ -384,13 +396,8 @@ def main():
 
         logging.info(f"Всего загружено IP-адресов из всех файлов: {len(all_source_ips)}")
 
-        logging.info("Загрузка и подготовка AS префиксов...")
-        as_data = load_as_prefixes(as_json_path, CONFIG.get('asn_filter'))
-
-        # Если после фильтрации данных нет - выход
-        if not as_data:
-            logging.error("Нет данных AS для обработки после применения фильтра")
-            return
+        logging.info("Загрузка MMDB базы ASN...")
+        mmdb_reader = load_asn_mmdb(as_mmdb_path)
 
         # Логика фильтрации DNS
         if dns_yaml_path.lower() == 'none':
@@ -406,40 +413,48 @@ def main():
             logging.warning("Нет уникальных IP-адресов для обработки")
             return
 
-        # Обработка IP
-        logging.info("Обработка IP-адресов...")
-        prefix_ip_map, no_prefix_ips = process_ips(sorted(unique_ips), as_data, CONFIG.get('asn_filter'))
+        # Обработка IP с MMDB
+        logging.info("Обработка IP-адресов с MMDB...")
+        asn_group_map, no_asn_ips = process_ips_with_mmdb(
+            sorted(unique_ips),
+            mmdb_reader,
+            asn_filter,  # Исправленный фильтр
+            country_filter  # Исправленный фильтр
+        )
+
+        # Закрываем MMDB reader
+        mmdb_reader.close()
 
         # Статистика
-        total_with_prefix = sum(len(ips) for ips in prefix_ip_map.values())
-        common_prefixes = sum(1 for ips in prefix_ip_map.values() if len(ips) >= CONFIG['prefix_threshold'])
+        total_with_asn = sum(data['total_ips'] for data in asn_group_map.values())
+        common_prefixes = sum(
+            1 for data in asn_group_map.values()
+            for ips in data['prefixes'].values()
+            if len(ips) >= CONFIG['prefix_threshold']
+        )
 
         logging.info(
             f"Итоговая статистика:\n"
-            f"- IP с найденными префиксами: {total_with_prefix}\n"
-            f"- IP без найденных префиксов: {len(no_prefix_ips)}\n"
+            f"- IP с найденной ASN информацией: {total_with_asn}\n"
+            f"- IP без ASN информации: {len(no_asn_ips)}\n"
+            f"- Уникальных ASN: {len(asn_group_map)}\n"
             f"- Префиксов для агрегации (>= {CONFIG['prefix_threshold']} IP): {common_prefixes}"
         )
 
-        # Информация о фильтрации
-        if CONFIG.get('asn_filter') is not None:
-            total_processed = total_with_prefix + len(no_prefix_ips)
-            logging.info(
-                f"Фильтрация ASN активна: добавлены только данные из {CONFIG['asn_filter']}\n"
-                f"- Обработано IP всего (из всех файлов): {len(unique_ips)}\n"
-                f"- Соответствует фильтру (включены в итоговый результат): {total_processed}\n"
-                f"- Отфильтровано (исключены из итогового результата): {len(unique_ips) - total_processed}"
-            )
-
-        # Подготовка имени выходного файла (на основе имени директории)
+        # Подготовка выходного файла
         output_filename = f"{dir_name}-ipv4.rsc"
         output_path = os.path.join(validate_directory(output_dir, "Выходная директория"), output_filename)
 
         # Генерация выходного .rsc файла
         logging.info(f"Создание файла {output_filename}...")
-        generate_rsc_file(prefix_ip_map, no_prefix_ips, output_path, dir_name)
 
-        logging.info("=== Скрипт ip_analyst успешно завершен ===")
+        content = generate_rsc_content_mmdb(asn_group_map, no_asn_ips, dir_name)
+
+        with open(output_path, 'w') as f:
+            f.write(content)
+
+        logging.info(f"Файл {output_path} успешно создан")
+        logging.info("=== Скрипт успешно завершен ===")
 
     except Exception as e:
         logging.error(f"Критическая ошибка: {e}", exc_info=True)
