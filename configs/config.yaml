@@ -24,6 +24,7 @@ main_start:
       lm_sensors: false                        ### Запускать группу скриптов lm_sensors-*.py (True/False)
       tld_parser: false                        ### Запускать группу скриптов tld_parser.py (True/False)
       get_asn_mmdb: false                      ### Запускать группу скриптов get_asn_mmdb.py (True/False)
+      yaml_to_txt: false                       ### Запускать группу скриптов yaml_to_txt.py (True/False)
     maintenance:                             ## Обслуживающий функционал системы
       logs_rotate: false                      ### Запускать скрипт logs_rotate.py (True/False)
 
@@ -42,6 +43,7 @@ main_start:
       lm_sensors: "false"
       tld_parser: "1d"
       get_asn_mmdb: "14d"
+      yaml_to_txt: "4h"
     maintenance:                             ## Актуальность запусков обслуживающего функционала
       logs_rotate: "false"                   ### Отключен - запуск без ограничений
 
@@ -73,8 +75,9 @@ main_start:
       patterns:                        # Паттерн масок скриптов (влияет на очередность исполнения)
         - "backup_Mikrotik-*.py"       # Группа выполнится 1-й
         - "get_IP_Connections-*.py"    # Группа выполнится 2-й
-        - "ip_analyst-*.py"            # Группа выполнится 3-й
-        - "lm_sensors-*.py"            # ...
+        - "yaml_to_txt-*.py"           # Группа выполнится 3-й
+        - "ip_analyst-*.py"            # ...
+        - "lm_sensors-*.py"
         - "filter_results_dns-*.py"
         - "tld_parser.py"
         - "get_asn_mmdb.py"
@@ -86,6 +89,7 @@ main_start:
         filter_results_dns: "^filter_results_dns"
         tld_parser: "^tld_parser"
         get_asn_mmdb: "^get_asn_mmdb"
+        yaml_to_txt: "^yaml_to_txt"
 
 # Настройки скрипта dns_fwd.py
 # ============================
@@ -113,7 +117,7 @@ dns_fwd:
     retention_days_domain: "14d"  # Количество дней хранить неактивные домены
     retention_days_ips: "7d"      # Количество дней хранить неактиные (historical) IP доменов
     backup_files: 2               # Количество backup-копий
-    skip_duplicates: true         # Пропускать дубликаты шаблонов при формировании results-dns.yaml (true/false)
+    skip_duplicates: false         # Пропускать дубликаты шаблонов при формировании results-dns.yaml (true/false)
 
 # Настройки скрипта fetch_as_prefixes.py
 # ======================================
@@ -193,7 +197,7 @@ sync_slave:
 
   setting_sync:          # Основные параметры синхронизации
     timeout: 3           ## Таймаут подключения к устройству (в секундах)
-    update_delay: 0.05   ## Задержка между операциями (секунды)
+    update_delay: 1   ## Задержка между операциями (секунды)
     batсh_size: 1200     ## Пакетная обработка записей (BATCH_SIZE)
 
   parallel:              # Настройки параллельной обработки
