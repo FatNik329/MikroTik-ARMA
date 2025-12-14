@@ -31,7 +31,7 @@ def setup_logger():
         datefmt='%Y-%m-%d %H:%M:%S'
     )
 
-	# Консольный вывод
+        # Консольный вывод
     ch = logging.StreamHandler()
     ch.setFormatter(formatter)
     ch.addFilter(HostnameFilter())
@@ -80,6 +80,9 @@ class DeviceChecker:
     @staticmethod
     def check_device_available(ip: str, port: int, timeout: int = 3) -> Tuple[bool, Optional[float]]:
         """Проверка доступности устройства с возвратом времени ping"""
+        if timeout is None:
+            timeout = 3
+
         start_time = time.time()
 
         # Проверка ping
@@ -195,7 +198,16 @@ class MikroTikSyncer:
         self.parallel_settings = self.config['slave_settings'].get('parallel', {
             'enabled': False, 'count_slave': 2, 'max_workers': 4, 'batch_size': 50, 'delay': 0.3
         })
+
+        # Применение приоритетов параметров из mikrotik.yaml
+        mikrotik_config = self.config.get('mikrotik', {})
+        if 'batch_size' in mikrotik_config:
+            self.parallel_settings['batch_size'] = mikrotik_config['batch_size']
+        elif 'batch_size' in self.config['slave_settings']:
+            self.parallel_settings['batch_size'] = self.config['slave_settings']['batch_size']
+
         self._connection_lock = threading.Lock()
+        self.error_counter = 0
 
     def _load_config(self) -> Dict[str, Any]:
         """Загрузка всех конфигураций"""
@@ -209,6 +221,25 @@ class MikroTikSyncer:
             slave_settings = general_config.get('sync_slave', {})
             slave_settings.setdefault('sett_auth', {'use_ssl': False})
             slave_settings.setdefault('setting_sync', {})
+
+            # Применение приоритетов - параметры из mikrotik.yaml переопределяют config.yaml
+            # Объединяем настройки с приоритетом для mikrotik.yaml
+            for key in ['batch_size', 'update_delay', 'timeout']:
+                if key in mikrotik_config:
+                    if key == 'batch_size':
+                        # batch_size может быть в корне mikrotik.yaml
+                        slave_settings.setdefault('parallel', {})['batch_size'] = mikrotik_config[key]
+                    elif key == 'update_delay':
+                        slave_settings.setdefault('setting_sync', {})[key] = mikrotik_config[key]
+                    elif key == 'timeout':
+                        slave_settings[key] = mikrotik_config[key]
+
+            # Проверка вложенной структуры mikrotik.yaml
+            if 'parallel' in mikrotik_config and 'batch_size' in mikrotik_config['parallel']:
+                slave_settings.setdefault('parallel', {})['batch_size'] = mikrotik_config['parallel']['batch_size']
+
+            if 'setting_sync' in mikrotik_config and 'update_delay' in mikrotik_config['setting_sync']:
+                slave_settings.setdefault('setting_sync', {})['update_delay'] = mikrotik_config['setting_sync']['update_delay']
 
             # Настройка уровня логирования
             log_level = slave_settings.get('logging', {}).get('log_level', 'INFO')
@@ -386,6 +417,7 @@ class MikroTikSyncer:
                 update_delay = self.config['slave_settings']['setting_sync'].get('update_delay', 0.05)
                 time.sleep(update_delay)
         except Exception as e:
+            self.error_counter += 1
             self.logger.error(f"Ошибка обновления {address}: {str(e)}")
 
     def _add_addresses_batch(self, slave_api, list_name: str, addresses: Set[Tuple], ipv6_supported: bool):
@@ -411,12 +443,10 @@ class MikroTikSyncer:
                 resource_path = '/ipv6/firewall/address-list' if ip_t == 'ipv6' and ipv6_supported else '/ip/firewall/address-list'
                 resource = slave_api.get_resource(resource_path)
 
-                # Проверка существования перед добавлением
-                existing = resource.get(list=list_name, address=addr, comment=comm)
-                if not existing:
-                    resource.add(list=list_name, address=str(addr), comment=str(comm))
+                resource.add(list=list_name, address=str(addr), comment=str(comm))
 
         except Exception as e:
+            self.error_counter += 1
             self.logger.error(f"Ошибка пакетного добавления: {str(e)}")
 
     def _remove_address(self, slave_api, list_name: str, address: str, comment: str, ip_type: str):
@@ -432,6 +462,7 @@ class MikroTikSyncer:
                 update_delay = self.config['slave_settings']['setting_sync'].get('update_delay', 0.05)
                 time.sleep(update_delay)
         except Exception as e:
+            self.error_counter += 1
             self.logger.error(f"Ошибка удаления {address}: {str(e)}")
 
     def run_sync(self):
@@ -627,6 +658,7 @@ class MikroTikSyncer:
             self.logger.info(f"Успешные синхронизации (устройства): {len(stats.get('success_slaves', []))}")
             self.logger.info(f"Неудачные синхронизации (устройства): {len(stats.get('unavailable_slaves', []))}")
 
+        self.logger.info(f"\nОбщее количество ошибок при синхронизации: {self.error_counter}")
         self.logger.info(f"\nОбщее время выполнения: {time.time() - start_time:.2f} секунд")
         self.logger.info("==== Синхронизация завершена ====\n")
 
