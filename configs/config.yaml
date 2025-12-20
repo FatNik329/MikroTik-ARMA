@@ -69,6 +69,7 @@ main_start:
       - "ASN MMDB файл не найден"
       - "Ошибка скачивания MMDB - IPLocate"
       - "Проверка структуры не пройдена"
+      - "Ошибка разбора YAML файла"
 
   scripts_discovery:                   # Секция расширения функционала Additional
     additional:
@@ -212,3 +213,37 @@ sync_slave:
 logs_rotate:
   max_dir_size: 5         # Максимальный размер директории с логами (в МБ)
   count_arch_logs: 3      # Количество архивов хранения
+
+
+# ===================================================
+# Дополнительные (additional) параметры MikroTik-ARMA
+# ===================================================
+
+# -----------------------------------------------------------------
+# Более приоритетная, чем конфигурация в скриптах - 'DEFAULT_CONFIG'
+# -----------------------------------------------------------------
+
+# Настройка группы скриптов-клиентов scripts/additional/ip_analyst/ip_analyst-*.py
+# =========================================
+ip_analyst:
+
+#------------------------
+#ExampleScripts <- 1-й пример скрипта-клиента из scripts/additional/ip_analyst/
+#------------------------
+  ExampleScripts: # имя скрипта из scripts/additional/ip_analyst/ip_analyst-ExampleScript.py
+    ip_list_dir: ['raw-data/ExampleList1/DNS/', 'raw-data/ExampleList2/DNS/'] # Входные данные для отбора и фильтрации (поддерживает TXT, JSON, YAML)
+    dns_file_filter: 'none'  # Входной файл results-dns.yaml для исключения адресов
+    asn_db_file: 'raw-data/ASN-db/ip-to-asn.mmdb' # MMDB база для отбора и обогащения адресов 
+    output_dir: 'output-data/NewExampleList/Custom' # Путь директории для сохранения выходных данных
+    output_filename: 'My-NewExampleList' # Имя используемое для названия файла и формируемого AddressList (RSC)
+
+    prefix_threshold: 3 # Количество IP адресов в префиксе для его агрегации
+    asn_filter: 'none' # Фильтрация по ASN
+    country_filter: 'none' # Фильтрация по коду страны
+    remove_last_seen: 100 # Удаляет IP адреса старшее N дней
+    report_generation: true  # или false - создает отчет об обработанных данных в отдельном файле
+
+#------------------------
+#ExampleScripts2 <- 2-й пример скрипта-клиента из scripts/additional/ip_analyst/
+#------------------------
+   #... Описание параметров ExampleScripts2
