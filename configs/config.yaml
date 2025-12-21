@@ -226,10 +226,9 @@ logs_rotate:
 # Настройка группы скриптов-клиентов scripts/additional/ip_analyst/ip_analyst-*.py
 # =========================================
 ip_analyst:
-
-#------------------------
+#--------------
 #ExampleScripts <- 1-й пример скрипта-клиента из scripts/additional/ip_analyst/
-#------------------------
+#--------------
   ExampleScripts: # имя скрипта из scripts/additional/ip_analyst/ip_analyst-ExampleScript.py
     ip_list_dir: ['raw-data/ExampleList1/DNS/', 'raw-data/ExampleList2/DNS/'] # Входные данные для отбора и фильтрации (поддерживает TXT, JSON, YAML)
     dns_file_filter: 'none'  # Входной файл results-dns.yaml для исключения адресов
@@ -243,7 +242,33 @@ ip_analyst:
     remove_last_seen: 100 # Удаляет IP адреса старшее N дней
     report_generation: true  # или false - создает отчет об обработанных данных в отдельном файле
 
-#------------------------
+#---------------
 #ExampleScripts2 <- 2-й пример скрипта-клиента из scripts/additional/ip_analyst/
-#------------------------
+#---------------
    #... Описание параметров ExampleScripts2
+
+# Настройка группы скриптов filter_results_dns-*.py
+# =================================================
+filter_results_dns:
+#--------------
+#ExampleScripts <- 1-й пример скрипта-клиента из scripts/additional/filter_results_dns/
+#--------------
+  ExampleScripts:
+    input_file: 'raw-data/ExampleList/DNS/results-dns.yaml'  # Путь до входящего YAML (results-dns.yaml) для обработки
+    output_file: 'raw-data/ExampleList/DNS/filter-results-dns.yaml' # Путь сохранения обработанного results-dns.yaml
+    domains_catsort: true # true/false. Генерировать дополнительный файл с категоризацией доменов 2-го ур.
+
+#... Дополнительные скрипты дополняются по такому же принципу
+
+# Настройка группы скриптов yaml_to_txt-*.py
+# =================================================
+yaml_to_txt:
+#-----------
+#ExampleList <- 1-й пример скрипта-клиента из scripts/additional/yaml_to_txt
+#-----------
+  ExampleList:
+    yaml_paths: ['raw-data/ExampleList/DNS/results-dns.yaml'] # Входные данные для конвертации
+    output_dir: 'raw-data/NewExampleList/TXT' # Выходные данные после конвертации
+    recursive_search: false # true/false. Рекурсивный поиск
+
+#... Дополнительные скрипты дополняются по такому же принципу
