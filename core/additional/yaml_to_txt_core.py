@@ -302,11 +302,24 @@ class YAMLToTXTConverter:
             # Сохранить IP адреса
             sorted_ips = sorted(ip_addresses)
 
-            with open(txt_path, 'w', encoding=self.config["encoding"]) as file:
-                for ip in sorted_ips:
-                    file.write(f"{ip}\n")
+            # Открываем файл в режиме чтения и записи
+            with open(txt_path, 'a+', encoding=self.config["encoding"]) as file:
+                file.seek(0)  # Переходим в начало для чтения
+                existing_ips = set(line.strip() for line in file if line.strip())
 
-            self.logger.info(f"Сохранено {len(sorted_ips)} IP в файл: {txt_path}")
+                # Возвращаемся в конец для записи
+                file.seek(0, 2)
+
+                new_ips_added = 0
+                for ip in sorted_ips:
+                    if ip not in existing_ips:
+                        file.write(f"{ip}\n")
+                        new_ips_added += 1
+
+                if new_ips_added:
+                    self.logger.info(f"Добавлено {new_ips_added} новых IP (из {len(sorted_ips)}) в файл: {txt_path}")
+                else:
+                    self.logger.info(f"{len(sorted_ips)} IP существуют в файле: {txt_path}")
 
         except Exception as e:
             self.logger.info(f"Ошибка при сохранении файла {txt_path}: {e}")
