@@ -13,6 +13,7 @@ from glob import glob
 from pathlib import Path
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import OrderedDict
 
 # 2. Глобальные переменные
 # Глобальный логгер, резолвер, кэш
@@ -21,6 +22,16 @@ resolver = dns.resolver.Resolver()
 failed_cache = {}
 
 # 3. Вспомогательные функции
+def convert_ordered_dict(obj):
+    """Рекурсивно преобразует OrderedDict в обычные dict"""
+    if isinstance(obj, OrderedDict):
+        return {k: convert_ordered_dict(v) for k, v in obj.items()}
+    elif isinstance(obj, dict):
+        return {k: convert_ordered_dict(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_ordered_dict(item) for item in obj]
+    else:
+        return obj
 
 def validate_log_format(log_file):
     """Проверяет соответствие формата лога (dnscrypt-proxy) ожидаемому шаблону"""
@@ -486,13 +497,13 @@ def resolve_domain(domain: str, dns_servers: list, timeout: float, config: dict)
     logger.debug(f"Добавлен в кэш неудачных запросов: {domain} (до {expiry})")
     return {}
 
-def parse_query_log(log_file, domain_configs):
-    """Парсинг лога (без загрузки всего файла)"""
+def parse_query_log(log_path, domain_configs):
+    """Парсинг лога или всех логов в директории (без загрузки всего файла)"""
     results = {list_name: {} for list_name in domain_configs}
-    line_count = 0
-    match_count = 0
-    wildcard_matches = 0
-    malformed_lines = 0
+    total_line_count = 0
+    total_match_count = 0
+    total_wildcard_matches = 0
+    total_malformed_lines = 0
 
     logger.info("Активные шаблоны поиска:")
     for list_name, categories in domain_configs.items():
@@ -500,69 +511,100 @@ def parse_query_log(log_file, domain_configs):
             has_wildcards = any('*' in t for t in targets)
             logger.info(f"  {list_name}/{category}: {len(targets)} шаблонов (wildcards: {has_wildcards})")
 
-    with open(log_file, "r") as f:
-        mmapped_file = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
-        for line in iter(mmapped_file.readline, b""):
-            line = line.decode("utf-8").strip()
-            line_count += 1
+    # Определение файлов для обработки
+    if os.path.isdir(log_path):
+        log_files = [os.path.join(log_path, f) for f in os.listdir(log_path)
+                    if f.endswith('.log') and os.path.isfile(os.path.join(log_path, f))]
+        logger.info(f"Обнаружена директория логов. Файлы для обработки: {len(log_files)}")
+    else:
+        log_files = [log_path]
+        logger.info(f"Обработка одиночного файла: {log_path}")
 
-            try:
-                if not line.startswith('['):
-                    malformed_lines += 1
-                    continue
+    for log_file in log_files:
+        if not os.path.exists(log_file):
+            logger.warning(f"Файл лога не найден, пропускаем: {log_file}")
+            continue
 
-                # Разделяет строку на части
-                parts = line.split(']', 1)
-                if len(parts) < 2:
-                    malformed_lines += 1
-                    continue
+        file_line_count = 0
+        file_match_count = 0
+        file_wildcard_matches = 0
+        file_malformed_lines = 0
 
-                # Получает оставшуюся часть строки после даты
-                rest = parts[1].strip().split()
-                if len(rest) < 3:
-                    malformed_lines += 1
-                    continue
+        with open(log_file, "r") as f:
+            mmapped_file = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+            for line in iter(mmapped_file.readline, b""):
+                line = line.decode("utf-8").strip()
+                file_line_count += 1
+                total_line_count += 1
 
-                domain = rest[1].lower()
-                record_type = rest[2].upper()
+                try:
+                    if not line.startswith('['):
+                        file_malformed_lines += 1
+                        total_malformed_lines += 1
+                        continue
 
-                if record_type not in ('A', 'AAAA'):
-                    continue
+                    # Разделяет строку на части
+                    parts = line.split(']', 1)
+                    if len(parts) < 2:
+                        file_malformed_lines += 1
+                        total_malformed_lines += 1
+                        continue
 
-                for list_name, categories in domain_configs.items():
-                    for category, targets in categories.items():
-                        for target in targets:
-                            if is_domain_match(domain, target):
-                                is_wildcard = '*' in target
+                    # Получает оставшуюся часть строки после даты
+                    rest = parts[1].strip().split()
+                    if len(rest) < 3:
+                        file_malformed_lines += 1
+                        total_malformed_lines += 1
+                        continue
 
-                                # Инициализация структуры результатов
-                                if category not in results[list_name]:
-                                    results[list_name][category] = {
-                                        'domains': {},
-                                        'wildcards': set() if any('*' in t for t in targets) else None
-                                    }
+                    domain = rest[1].lower()
+                    record_type = rest[2].upper()
 
-                                # Сохраняет домена и шаблона, по которому он был обнаружен
-                                if domain not in results[list_name][category]['domains']:
-                                    results[list_name][category]['domains'][domain] = {
-                                        'target_template': f"{category} -> {target}"
-                                    }
+                    if record_type not in ('A', 'AAAA'):
+                        continue
 
-                                if is_wildcard:
-                                    wildcard_matches += 1
-                                    if results[list_name][category]['wildcards'] is not None:
-                                        results[list_name][category]['wildcards'].add(domain)
-                                match_count += 1
-                                break
+                    for list_name, categories in domain_configs.items():
+                        for category, targets in categories.items():
+                            for target in targets:
+                                if is_domain_match(domain, target):
+                                    is_wildcard = '*' in target
 
-            except Exception as e:
-                logger.warning(f"Ошибка строки {line_count}: {e}")
-                malformed_lines += 1
+                                    # Инициализация структуры результатов
+                                    if category not in results[list_name]:
+                                        results[list_name][category] = {
+                                            'domains': {},
+                                            'wildcards': set() if any('*' in t for t in targets) else None
+                                        }
 
-    logger.info(f"Обработано строк: {line_count}")
-    logger.info(f"Совпадений: {match_count} (из них wildcards: {wildcard_matches})")
-    if malformed_lines > 0:
-        logger.warning(f"Найдено строк с неверным форматом: {malformed_lines}")
+                                    # Сохраняет домена и шаблона, по которому он был обнаружен
+                                    if domain not in results[list_name][category]['domains']:
+                                        results[list_name][category]['domains'][domain] = {
+                                            'target_template': f"{category} -> {target}"
+                                        }
+
+                                    if is_wildcard:
+                                        file_wildcard_matches += 1
+                                        total_wildcard_matches += 1
+                                        if results[list_name][category]['wildcards'] is not None:
+                                            results[list_name][category]['wildcards'].add(domain)
+                                    file_match_count += 1
+                                    total_match_count += 1
+                                    break
+
+                except Exception as e:
+                    logger.warning(f"Ошибка строки {file_line_count} в файле {log_file}: {e}")
+                    file_malformed_lines += 1
+                    total_malformed_lines += 1
+
+            mmapped_file.close()
+
+        logger.info(f"Файл {log_file}: строк={file_line_count}, совпадений={file_match_count}, wildcards={file_wildcard_matches}")
+
+    logger.info(f"Итого обработано файлов: {len(log_files)}")
+    logger.info(f"Всего строк: {total_line_count}")
+    logger.info(f"Всего совпадений: {total_match_count} (из них wildcards: {total_wildcard_matches})")
+    if total_malformed_lines > 0:
+        logger.warning(f"Всего строк с неверным форматом: {total_malformed_lines}")
 
     return results
 
@@ -639,12 +681,10 @@ def save_results(results, dns_servers, timeout, config, domain_records):
         else:
             logger.info("[✓] Режим skip_duplicates=False - дубликаты включены в результаты")
 
-    # Основной цикл обработки результатов
     for list_name, categories in results.items():
         if not categories:
             continue
 
-    for list_name, categories in results.items():
         list_stats = {
             'domains': 0,
             'idn': 0,
@@ -654,6 +694,8 @@ def save_results(results, dns_servers, timeout, config, domain_records):
             'skipped_duplicates': 0
         }
 
+        processed_domains_in_current_list = {}
+
         output_dir = Path("raw-data") / list_name / ("DNS")
         output_dir.mkdir(parents=True, exist_ok=True)
         result_file = output_dir / "results-dns.yaml"
@@ -661,16 +703,16 @@ def save_results(results, dns_servers, timeout, config, domain_records):
         existing_data = load_existing_results(result_file)
         now = datetime.now()
 
-        new_data = {
-            "meta": {
+        new_data = OrderedDict([
+            ("meta", {
                 "generated_at": now.strftime("%Y-%m-%d %H:%M:%S"),
                 "dns_servers": dns_servers,
                 "timeout": timeout,
                 "update_mode": "incremental",
                 "skip_duplicates": skip_duplicates
-            },
-            "categories": {}
-        }
+            }),
+            ("categories", {})
+        ])
 
         for category, data in categories.items():
             if not data or not data.get('domains'):
@@ -682,27 +724,40 @@ def save_results(results, dns_servers, timeout, config, domain_records):
             # Инициализация категории в новых данных
             new_data["categories"][category] = {}
 
-            # Фильтрация доменов (исключает дубликаты в результат если skip_duplicates=True)
-            domains_to_resolve = [
-                domain for domain in data['domains']
-                if not (skip_duplicates and domain in duplicates)
-            ]
+            skipped_duplicates_in_current_list = []
 
-            # Параллельный резолвинг
+            # Сначала собираем ВСЕ домены для этой категории
+            all_domains_in_category = list(data['domains'].keys())
+
+            # Фильтрация доменов с учетом skip_duplicates в конкретном {list_name}
+            filtered_domains = []
+            for domain in all_domains_in_category:
+                if skip_duplicates and domain in processed_domains_in_current_list:
+                    list_stats['skipped_duplicates'] += 1
+                    skipped_duplicates_in_current_list.append(domain)
+                    continue
+
+                processed_domains_in_current_list[domain] = True
+                filtered_domains.append(domain)
+
+            if skipped_duplicates_in_current_list:
+                logger.info(f"Список {list_name}/{category}: пропущено {len(skipped_duplicates_in_current_list)} дубликатов")
+
+            # Если после фильтрации не осталось доменов - пропускаем категорию
+            if not filtered_domains:
+                continue
+
+            # Параллельный резолвинг отфильтрованных доменов
             resolved_ips = resolve_domains_parallel(
-                domains=domains_to_resolve,
+                domains=filtered_domains,
                 dns_servers=dns_servers,
                 timeout=timeout,
                 config=config
             )
 
-            for domain in data['domains']:
+            # Обработка отфильтрованных доменов
+            for domain in filtered_domains:
                 try:
-                    # Пропуск дубликатов - если включен
-                    if skip_duplicates and domain in duplicates:
-                        list_stats['skipped_duplicates'] += 1
-                        continue
-
                     is_wildcard = domain in wildcards_in_category if wildcards_in_category is not None else False
                     is_idn = is_idn_domain(domain)
 
@@ -748,47 +803,65 @@ def save_results(results, dns_servers, timeout, config, domain_records):
             removed_in_category = 0
             removed_ips_in_category = 0
 
-            for domain, old_data in existing_data.get("categories", {}).get(category, {}).items():
-                if domain not in merged_domains and not (skip_duplicates and domain in duplicates):
-                    try:
-                        last_seen = old_data.get("last_seen")
-                        if last_seen:
-                            last_date = datetime.strptime(last_seen, "%Y-%m-%d %H:%M:%S")
-                            if (now - last_date).days <= retention_days_domain:
-                                merged_data = {
-                                    "active": False,
-                                    "last_seen": last_seen
-                                }
-                                # Сохранение IP с историческими данными
-                                if old_data.get("ipv4"):
-                                    merged_data["ipv4"] = old_data["ipv4"]
-                                if old_data.get("ipv6"):
-                                    merged_data["ipv6"] = old_data["ipv6"]
-                                # Сохранение шаблона и IDN-имени
-                                if "target_template" in old_data:
-                                    merged_data["target_template"] = old_data["target_template"]
-                                if "idn_name" in old_data:
-                                    merged_data["idn_name"] = old_data["idn_name"]
-                                merged_domains[domain] = merged_data
-                            else:
-                                removed_in_category += 1
-                    except Exception as e:
-                        logger.warning(f"Ошибка обработки исторических данных домена: {e}")
+            # Сначала собираем ВСЕ домены из старых данных для этой категории
+            old_domains_in_category = existing_data.get("categories", {}).get(category, {})
 
-                # Обработка historical IP
-                elif domain in merged_domains:
+            for domain, old_data in old_domains_in_category.items():
+                if domain in merged_domains:
+                    continue
+
+                # Если включен skip_duplicates и это дубликат в текущем списке - пропускаем
+               # if skip_duplicates and domain in skipped_duplicates_in_current_list:
+                #    continue
+
+                # Обработка устаревших доменов (которых нет в текущих результатах)
+                try:
+                    last_seen = old_data.get("last_seen")
+                    if last_seen:
+                        last_date = datetime.strptime(last_seen, "%Y-%m-%d %H:%M:%S")
+                        if (now - last_date).days <= retention_days_domain:
+                            merged_data = {
+                                "active": False,
+                                "last_seen": last_seen
+                            }
+                            # Сохранение IP с историческими данными
+                            if old_data.get("ipv4"):
+                                merged_data["ipv4"] = old_data["ipv4"]
+                            if old_data.get("ipv6"):
+                                merged_data["ipv6"] = old_data["ipv6"]
+                            # Сохранение шаблона и IDN-имени
+                            if "target_template" in old_data:
+                                merged_data["target_template"] = old_data["target_template"]
+                            if "idn_name" in old_data:
+                                merged_data["idn_name"] = old_data["idn_name"]
+                            merged_domains[domain] = merged_data
+                        else:
+                            removed_in_category += 1
+                except Exception as e:
+                    logger.warning(f"Ошибка обработки исторических данных домена: {e}")
+
+            # Отдельно обрабатывает historical данные для доменов, которые есть и в старых, и в новых результатах
+            for domain in list(merged_domains.keys()):
+                if domain in old_domains_in_category:
                     try:
                         merged_data = merged_domains[domain]
+                        old_data = old_domains_in_category[domain]
                         current_time = now.strftime("%Y-%m-%d %H:%M:%S")
 
-                        # Обработка IPv4 и IPv6
+                        # Обработка IPv4 и IPv6 historical данных
                         for ip_type in ["ipv4", "ipv6"]:
                             if old_data.get(ip_type) and merged_data.get(ip_type):
-                                # Сохранение исторических IP из предыдущих результатов
-                                if "historical" in old_data[ip_type]:
-                                    merged_data[ip_type]["historical"] = old_data[ip_type]["historical"].copy()
+                                # Инициализирует historical
+                                if "historical" not in merged_data[ip_type]:
+                                    merged_data[ip_type]["historical"] = {}
 
-                                # Обновление временных меток для текущих IP
+                                # Копирует исторические данные из старых результатов
+                                if "historical" in old_data[ip_type]:
+                                    for historical_ip, ip_timestamp in old_data[ip_type]["historical"].items():
+                                        if historical_ip not in merged_data[ip_type]["historical"]:
+                                            merged_data[ip_type]["historical"][historical_ip] = ip_timestamp
+
+                                # Добавляет текущие IP в historical с текущим временем
                                 for current_ip in merged_data[ip_type]["current"]:
                                     merged_data[ip_type]["historical"][current_ip] = current_time
 
@@ -830,11 +903,14 @@ def save_results(results, dns_servers, timeout, config, domain_records):
                     old_backup.unlink()
                 backup_file = backup_dir / f"results_{now.strftime('%Y%m%d_%H%M%S')}.yaml"
                 with open(backup_file, "w") as f:
-                    yaml.dump(existing_data, f)
+                    backup_data = convert_ordered_dict(existing_data)
+                    yaml.dump(backup_data, f, sort_keys=False, allow_unicode=True)
 
             # Сохранение новых данных
             with open(result_file, "w") as f:
-                yaml.dump(new_data, f, sort_keys=False, allow_unicode=True)
+                # Преобразует OrderedDict в обычный dict перед сохранением
+               data_to_save = convert_ordered_dict(new_data)
+               yaml.dump(data_to_save, f, sort_keys=False, allow_unicode=True)
 
             total_stats['lists'] += 1
             total_stats['domains'] += list_stats['domains']
@@ -909,23 +985,44 @@ def main():
         # Загрузка кэша
         failed_cache = load_failed_cache(config)
 
-        log_file = config["dns_fwd"]["logging"]["query_log_path"]
-        if not os.path.exists(log_file):
-            logger.error(f"Файл лога не найден: {log_file}")
+        log_path = config["dns_fwd"]["logging"]["query_log_path"]
+
+        # Проверка существования пути (файла или директории)
+        if not os.path.exists(log_path):
+            logger.error(f"Путь не найден: {log_path}")
             return
 
-        # Проверка формата лога dnscrypt-proxy
-        if not validate_log_format(log_file):
-            logger.error(
-                "Файл лога не соответствует ожидаемому формату!\n"
-                "Ожидаемый формат каждой строки:\n"
-                "[YYYY-MM-DD HH:MM:SS] IP ДОМЕН ТИП_ЗАПРОСА СТАТУС ВРЕМЯ СЕРВЕР\n"
-                "Пример:\n"
-                "[2025-07-27 16:31:57] 172.1.1.2 steamcontent.com A PASS 2ms -"
-            )
-            return
+        # Проверка формата для одиночного файла
+        if os.path.isfile(log_path):
+            if not validate_log_format(log_path):
+                logger.error(
+                    "Файл лога не соответствует ожидаемому формату!\n"
+                    "Ожидаемый формат каждой строки:\n"
+                    "[YYYY-MM-DD HH:MM:SS] IP ДОМЕН ТИП_ЗАПРОСА СТАТУС ВРЕМЯ СЕРВЕР\n"
+                    "Пример:\n"
+                    "[2025-07-27 16:31:57] 172.1.1.2 steamcontent.com A PASS 2ms -"
+                )
+                return
+        else:
+            # Для директории проверяем первый найденный .log файл
+            log_files = [os.path.join(log_path, f) for f in os.listdir(log_path)
+                        if f.endswith('.log') and os.path.isfile(os.path.join(log_path, f))]
+            if log_files:
+                sample_file = log_files[0]
+                if not validate_log_format(sample_file):
+                    logger.error(
+                        f"Файл лога {sample_file} не соответствует ожидаемому формату!\n"
+                        "Ожидаемый формат каждой строки:\n"
+                        "[YYYY-MM-DD HH:MM:SS] IP ДОМЕН ТИП_ЗАПРОСА СТАТУС ВРЕМЯ СЕРВЕР\n"
+                        "Пример:\n"
+                        "[2025-07-27 16:31:57] 172.1.1.2 steamcontent.com A PASS 2ms -"
+                    )
+                    return
+            else:
+                logger.error(f"В директории {log_path} не найдено .log файлов")
+                return
 
-        results = parse_query_log(log_file, domain_configs)
+        results = parse_query_log(log_path, domain_configs)
 
         # Анализ дубликатов
         logger.info("\n=== Анализ дубликатов шаблонов ===")
