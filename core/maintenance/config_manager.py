@@ -2,6 +2,7 @@
 Универсальный менеджер конфигураций для модулей системы MikroTik-ARMA.
 Поддерживает приоритет: YAML конфиг > DEFAULT_CONFIG скрипта
 """
+
 import yaml
 import logging
 from typing import Dict, Any, Optional
@@ -175,6 +176,24 @@ def get_yaml_to_txt_config(
 
     return merge_configs(default_config, yaml_config, module_name, script_key)
 
+def get_json_to_txt_config(
+    default_config: Dict[str, Any],
+    script_name: str,
+    config_path: str = 'configs/config.yaml'
+) -> Dict[str, Any]:
+    """
+    Специализированная функция для модуля json_to_txt.
+    """
+    module_name = 'json_to_txt'
+    script_key = get_script_key(script_name, module_prefix='json_to_txt-')
+
+    yaml_config = load_module_config_from_yaml(
+        module_name=module_name,
+        script_key=script_key,
+        config_path=config_path
+    )
+
+    return merge_configs(default_config, yaml_config, module_name, script_key)
 
 def get_generic_config(
     default_config: Dict[str, Any],
@@ -203,4 +222,3 @@ def get_generic_config(
     )
 
     return merge_configs(default_config, yaml_config, module_name, script_key)
-  
