@@ -26,6 +26,7 @@ DEFAULT_CONFIG = {
     # Рекурсивный поиск в поддиректориях
     'recursive_search': False,
     'encoding': 'utf-8',
+    'type_generation': 'additive',
 }
 
 def main():
