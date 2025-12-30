@@ -270,5 +270,6 @@ yaml_to_txt:
     yaml_paths: ['raw-data/ExampleList/DNS/results-dns.yaml'] # Входные данные для конвертации
     output_dir: 'raw-data/NewExampleList/TXT' # Выходные данные после конвертации
     recursive_search: false # true/false. Рекурсивный поиск
+    type_generation: 'recreation' # Тип генерации: recreation - полностью пересоздаёт TXT файлы /additive - режим дозаписывания, без полного затирания TXT
 
 #... Дополнительные скрипты дополняются по такому же принципу
