@@ -1,6 +1,6 @@
 """
 Ядро функционала для скриптов yaml_to_txt-*
-Содержит всю общую логику для конвертации YAML файлов с IP адресами (IPv4) в текстовые файлы (TXT)
+Содержит логику для конвертации YAML файлов с IP адресами (IPv4) в текстовые файлы (TXT)
 """
 import yaml
 import sys
@@ -37,8 +37,9 @@ class YAMLToTXTConverter:
         Returns:
             True если обработка завершена успешно, False в случае ошибки
         """
+        self.logger.info(f"\n=== Запуск {self.script_name} - конвертер YAML в TXT ===")
+
         try:
-            # Обработка сигналов
             signal.signal(signal.SIGINT, self._signal_handler)
             signal.signal(signal.SIGTERM, self._signal_handler)
 
@@ -51,7 +52,6 @@ class YAMLToTXTConverter:
                 self.logger.error("Не указаны пути YAML в конфигурации")
                 return False
 
-            # Конвертация строковых путей в объекты Path
             path_objects = []
             for path in yaml_paths:
                 if isinstance(path, str):
@@ -70,6 +70,13 @@ class YAMLToTXTConverter:
                 self.logger.error("Нет валидных путей для обработки")
                 return False
 
+            # Проверка допустимых значений type_generation
+            valid_generation_types = ['recreation', 'additive']
+            type_generation = self.config.get('type_generation', 'additive')
+            if type_generation not in valid_generation_types:
+                self.logger.warning(f"Неизвестный тип генерации: {type_generation}. Используется 'additive' по умолчанию")
+                self.config['type_generation'] = 'additive'
+
             # Вывод настроек
             self.logger.info("=" * 60)
             self.logger.info("НАСТРОЙКИ СКРИПТА:")
@@ -84,6 +91,8 @@ class YAMLToTXTConverter:
                 output_dir = Path(output_dir) if isinstance(output_dir, str) else output_dir
                 self.logger.info(f"Выходная директория: {output_dir}")
             self.logger.info(f"Рекурсивный поиск: {'Да' if self.config.get('recursive_search', False) else 'Нет'}")
+            type_generation = self.config.get('type_generation', 'additive')
+            self.logger.info(f"Тип генерации TXT файлов: {type_generation}")
             self.logger.info("=" * 60)
 
             # Обработка каждого пути
@@ -104,22 +113,43 @@ class YAMLToTXTConverter:
             if all_results:
                 if output_dir:
                     self.logger.info(f"Сохранение результатов в директорию: {output_dir}")
+
+                    # Очистка директории в режиме recreation
+                    type_generation = self.config.get('type_generation', 'additive')
+                    if type_generation == 'recreation':
+                        self.logger.info(f"Режим 'recreation': очистка выходной директории от .txt файлов")
+                        self.logger.info(f"Директория: {output_dir}")
+
+                        try:
+                            txt_files_deleted = 0
+                            if output_dir.exists():
+                                for txt_file in output_dir.glob("*.txt"):
+                                    try:
+                                        if txt_file.is_file():
+                                            txt_file.unlink()
+                                            txt_files_deleted += 1
+                                    except Exception as e:
+                                        self.logger.error(f"Не удалось удалить файл {txt_file}: {e}")
+                                        self.stats["errors"] += 1
+
+                            if txt_files_deleted > 0:
+                                self.logger.info(f"Удалено {txt_files_deleted} .txt файлов")
+                            else:
+                                self.logger.info("В выходной директории не найдено .txt файлов для удаления")
+
+                        except Exception as e:
+                            self.logger.error(f"Ошибка при очистке директории {output_dir}: {e}")
+                            self.stats["errors"] += 1
+
                     for category, ips in all_results.items():
                         self.save_to_txt(category, ips, output_dir)
-                else:
-                    self.logger.error("Не указана выходная директория в конфигурации")
-                    return False
-            else:
-                self.logger.warning("Не найдено IP адресов для обработки")
 
             # Вывод статистики
             execution_time = time.time() - start_time
-            # Выводим статистику
-            execution_time = time.time() - start_time
             self.logger.info("=" * 60)
             self.logger.info("СТАТИСТИКА ОБРАБОТКИ:")
-            self.logger.info(f"Обработано путей: {self.stats['yaml_paths_processed']}/{len(valid_paths)}")
-            self.logger.info(f"Обработано файлов: {self.stats['files_processed']}")
+            self.logger.info(f"Обработано путей (исходных данных): {self.stats['yaml_paths_processed']}/{len(valid_paths)}")
+            self.logger.info(f"Обработано исходных файлов: {self.stats['files_processed']}")
             self.logger.info(f"Извлечено IP адресов: {self.stats['ips_extracted']}")
             self.logger.info(f"Создано TXT файлов: {len(all_results)}")
             self.logger.info(f"Ошибок: {self.stats['errors']}")
@@ -181,7 +211,6 @@ class YAMLToTXTConverter:
                 if not isinstance(host_data, dict):
                     continue
 
-                # Провка раздела ipv4
                 ipv4_data = host_data.get("ipv4")
                 if not ipv4_data or not isinstance(ipv4_data, dict):
                     continue
@@ -244,7 +273,7 @@ class YAMLToTXTConverter:
                 self.logger.info(f"Файл {yaml_path} пуст или некорректен")
                 return result
 
-            # Находим все категории
+            # Поиск всех категорий
             categories = self.find_all_categories(data)
 
             if not categories:
@@ -279,11 +308,6 @@ class YAMLToTXTConverter:
     def save_to_txt(self, category: str, ip_addresses: Set[str], output_dir: Path):
         """
         Сохраняет IP адреса в TXT файл
-
-        Args:
-            category: Название категории (имя файла)
-            ip_addresses: Множество IP адресов
-            output_dir: Директория для сохранения
         """
         if not ip_addresses or self._stop_requested:
             return
@@ -299,27 +323,56 @@ class YAMLToTXTConverter:
             # Создать директорию если не существует
             txt_path.parent.mkdir(parents=True, exist_ok=True)
 
-            # Сохранить IP адреса
+            # Получение режима генерации
+            type_generation = self.config.get('type_generation', 'additive')
+
+            # Сортирует IP адреса
             sorted_ips = sorted(ip_addresses)
 
-            # Открываем файл в режиме чтения и записи
-            with open(txt_path, 'a+', encoding=self.config["encoding"]) as file:
-                file.seek(0)  # Переходим в начало для чтения
-                existing_ips = set(line.strip() for line in file if line.strip())
-
-                # Возвращаемся в конец для записи
-                file.seek(0, 2)
-
-                new_ips_added = 0
-                for ip in sorted_ips:
-                    if ip not in existing_ips:
+            if type_generation == 'recreation':
+                # Режим пересоздания - генерация файлов TXT с нуля
+                with open(txt_path, 'w', encoding=self.config["encoding"]) as file:
+                    for ip in sorted_ips:
                         file.write(f"{ip}\n")
-                        new_ips_added += 1
 
-                if new_ips_added:
-                    self.logger.info(f"Добавлено {new_ips_added} новых IP (из {len(sorted_ips)}) в файл: {txt_path}")
-                else:
-                    self.logger.info(f"{len(sorted_ips)} IP существуют в файле: {txt_path}")
+                self.logger.info(f"Создан/перезаписан файл с {len(sorted_ips)} IP: {txt_path}")
+
+            elif type_generation == 'additive':
+                # Режим дозаписи
+                with open(txt_path, 'a+', encoding=self.config["encoding"]) as file:
+                    file.seek(0)
+                    existing_ips = set(line.strip() for line in file if line.strip())
+
+                    file.seek(0, 2)
+
+                    new_ips_added = 0
+                    for ip in sorted_ips:
+                        if ip not in existing_ips:
+                            file.write(f"{ip}\n")
+                            new_ips_added += 1
+
+                    if new_ips_added:
+                        self.logger.info(f"Добавлено {new_ips_added} новых IP (из {len(sorted_ips)}) в файл: {txt_path}")
+                    else:
+                        self.logger.info(f"{len(sorted_ips)} IP существуют в файле: {txt_path}")
+            else:
+                self.logger.error(f"Неизвестный тип генерации: {type_generation}. Используется режим 'additive'")
+                # Использовать режим дозаписи по умолчанию
+                with open(txt_path, 'a+', encoding=self.config["encoding"]) as file:
+                    file.seek(0)
+                    existing_ips = set(line.strip() for line in file if line.strip())
+                    file.seek(0, 2)
+
+                    new_ips_added = 0
+                    for ip in sorted_ips:
+                        if ip not in existing_ips:
+                            file.write(f"{ip}\n")
+                            new_ips_added += 1
+
+                    if new_ips_added:
+                        self.logger.info(f"Добавлено {new_ips_added} новых IP (из {len(sorted_ips)}) в файл: {txt_path}")
+                    else:
+                        self.logger.info(f"{len(sorted_ips)} IP существуют в файле: {txt_path}")
 
         except Exception as e:
             self.logger.info(f"Ошибка при сохранении файла {txt_path}: {e}")
@@ -396,3 +449,4 @@ class YAMLToTXTConverter:
 
 if __name__ == "__main__":
     main()
+
