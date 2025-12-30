@@ -1,4 +1,4 @@
-# lib/logs_modules.py
+# core/logs_modules.py
 """
 Универсальный модуль логирования для скриптов системы MikroTik-ARMA.
 """
