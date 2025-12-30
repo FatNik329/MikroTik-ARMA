@@ -25,6 +25,7 @@ main_start:
       tld_parser: false                        ### Запускать группу скриптов tld_parser.py (True/False)
       get_asn_mmdb: false                      ### Запускать группу скриптов get_asn_mmdb.py (True/False)
       yaml_to_txt: false                       ### Запускать группу скриптов yaml_to_txt.py (True/False)
+      json_to_txt: true                        ### Запускать группу скриптов json_to_txt (True/False)
     maintenance:                             ## Обслуживающий функционал системы
       logs_rotate: false                      ### Запускать скрипт logs_rotate.py (True/False)
 
@@ -44,6 +45,7 @@ main_start:
       tld_parser: "1d"
       get_asn_mmdb: "14d"
       yaml_to_txt: "4h"
+      json_to_txt: "4h"   
     maintenance:                             ## Актуальность запусков обслуживающего функционала
       logs_rotate: "false"                   ### Отключен - запуск без ограничений
 
@@ -70,6 +72,7 @@ main_start:
       - "Ошибка скачивания MMDB - IPLocate"
       - "Проверка структуры не пройдена"
       - "Ошибка разбора YAML файла"
+      - "Ошибка парсинга JSON"
 
   scripts_discovery:                   # Секция расширения функционала Additional
     additional:
@@ -77,7 +80,8 @@ main_start:
         - "backup_Mikrotik-*.py"       # Группа выполнится 1-й
         - "get_IP_Connections-*.py"    # Группа выполнится 2-й
         - "yaml_to_txt-*.py"           # Группа выполнится 3-й
-        - "ip_analyst-*.py"            # ...
+        - "json_to_txt-*.py"           # ...
+        - "ip_analyst-*.py"            
         - "lm_sensors-*.py"
         - "filter_results_dns-*.py"
         - "tld_parser.py"
@@ -91,6 +95,7 @@ main_start:
         tld_parser: "^tld_parser"
         get_asn_mmdb: "^get_asn_mmdb"
         yaml_to_txt: "^yaml_to_txt"
+        json_to_txt: "^json_to_txt"
 
 # Настройки скрипта dns_fwd.py
 # ============================
@@ -273,3 +278,19 @@ yaml_to_txt:
     type_generation: 'recreation' # Тип генерации: recreation - полностью пересоздаёт TXT файлы /additive - режим дозаписывания, без полного затирания TXT
 
 #... Дополнительные скрипты дополняются по такому же принципу
+
+
+# Настройка группы скриптов json_to_txt-*.py
+# =================================================
+json_to_txt:
+#------------------------
+#ExampleList <- 1-й пример скрипта-клиента из scripts/additional/json_to_txt
+#------------------------
+  ExampleList:
+    json_paths:
+      - 'raw-data/ExampleList/report/ExampleList-report.json'
+#      - 'raw-data/ExampleList2/report/ExampleList-report.json'
+    output_dir: 'raw-data/NewExampleList/TXT/JSON'
+    recursive_search: false
+    type_generation: 'recreation' # Тип генерации: recreation - полностью пересоздаёт TXT файлы /additive - режим дозаписывания, без полного затирания TXT
+
