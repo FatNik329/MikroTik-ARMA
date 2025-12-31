@@ -63,7 +63,7 @@ class JSONToTXTConverter:
     def run(self) -> bool:
         """Основной метод запуска конвертера."""
 
-        self.logger.info(f"\n=== Запуск {self.script_name} - конвертер JSON в RSC ===")
+        self.logger.info(f"\n=== Запуск {self.script_name} - конвертер JSON в TXT ===")
 
         try:
             self._log_startup_info()
