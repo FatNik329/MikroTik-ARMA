@@ -25,6 +25,7 @@ class LoggerManager:
         'filter_results_dns': 'logs/additional/filter_results_dns',
         'get_IP_Connections': 'logs/additional/get_IP_Connections',
         'yaml_to_txt': 'logs/additional/yaml_to_txt',
+        'json_to_txt': 'logs/additional/json_to_txt',
     }
 
     @classmethod
