@@ -19,17 +19,19 @@ from core.maintenance.config_manager import get_ip_analyst_config
 DEFAULT_CONFIG = {
     # Пути к файлам
     'ip_list_dir': ['raw-data/ExampleList/TXT'],  # Директория с исходными IP-адресами (TXT, JSON, YAML).  # Может быть строкой или списком ['путь1', 'путь2']
+    'mapping_file_path': ['raw-data/ASN-db/i2p-to-asn.schema.json'], # Путь до схемы файла (маппинг данных) структуры MMDB. Хранится по тому же пути, что MMDB (если скачана через скрипт scripts/additional/utility/get_asn_mmdb.py)
     'dns_file_filter': 'none', # Файл с DNS записями (исключает совпадения). Опциональный параметр, для отключения 'none'. Для включения указать путь до файла results-dns.yaml '/path/to/results-dns.yaml'
-    'asn_db_file': 'path/to/ip-to-asn.mmdb',
+    'asn_db_file': 'path/to/ip-to-asn.mmdb',  # Путь до MMDB базы
     'output_dir': 'output-data/ExampleList/Custom',    # Кастомная директория для сохранения .rsc файла
 
     # Имя выходного файла
     'output_filename': 'My-ExampleList',  # Определяет и имя файла, и имя листа в RSC. 'none' - используется комбинированное имя всех исходных файлов
 
     # Дополнительные параметры и фильтры
-    'prefix_threshold': 5,  # Минимальное количество IP в префиксе для его добавления
-    'asn_filter': 'none',  # Пример: определённые ASN ['AS8075', 'AS15169', 'AS32934']. Без фильтрации: one
-    'country_filter': 'none', # Пример: фильтрация на основе кода страны ['US', 'FR', 'RU', ...]. Без фильтраации: none
+    'prefix_threshold': 5,  # Минимальное количество IP в префиксе для его добавления в виде префикса в итоговый результат
+    'asn_filter': 'none',  # Пример: определённые ASN ['AS8075', 'AS15169', 'AS32934'] для включения в итоговый результат. Без фильтрации: none
+    'country_include': 'none', # Пример: фильтрация для включения в итоговый результат на основе кода страны ['US', 'FR', 'RU', ...]. Без фильтраации: none
+    'country_exclude': 'none', # Пример: фильтрация для исключения на основе кода страны ['US', 'FR', 'RU', ...]. Без фильтраации: none
     'remove_last_seen': 55,  # Исключать IP, которые не появлялись более N дней (поддерживает ТОЛЬКО целые числа - дни). Без фильтрации: None
     'report_generation': 'true', # true/false - генерировать подробный отчёт об обработанных данных
 }
