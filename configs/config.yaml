@@ -236,6 +236,7 @@ ip_analyst:
 #--------------
   ExampleScripts: # имя скрипта из scripts/additional/ip_analyst/ip_analyst-ExampleScript.py
     ip_list_dir: ['raw-data/ExampleList1/DNS/', 'raw-data/ExampleList2/DNS/'] # Входные данные для отбора и фильтрации (поддерживает TXT, JSON, YAML)
+    mapping_file_path: ['raw-data/ASN-db/ip-to-asn.schema.json'] # Путь до схемы файла (маппинг данных) структуры MMDB. Хранится по тому же пути, что MMDB (если скачана через скрипт scripts/additional/utility/get_asn_mmdb.py)
     dns_file_filter: 'none'  # Входной файл results-dns.yaml для исключения адресов
     asn_db_file: 'raw-data/ASN-db/ip-to-asn.mmdb' # MMDB база для отбора и обогащения адресов 
     output_dir: 'output-data/NewExampleList/Custom' # Путь директории для сохранения выходных данных
