@@ -243,7 +243,8 @@ ip_analyst:
 
     prefix_threshold: 3 # Количество IP адресов в префиксе для его агрегации
     asn_filter: 'none' # Фильтрация по ASN
-    country_filter: 'none' # Фильтрация по коду страны
+    country_include: 'none' # Фильтрация для включения по коду страны
+    country_exclude: 'none' # Фильтрация для ислючения по коду страны
     remove_last_seen: 100 # Удаляет IP адреса старшее N дней
     report_generation: true  # или false - создает отчет об обработанных данных в отдельном файле
 
