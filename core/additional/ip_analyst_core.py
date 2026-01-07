@@ -1,5 +1,5 @@
 """
-Ядро функционала для скриптов ip_analyst-*
+Ядро функционала для всех скриптов ip_analyst-*
 Содержит всю общую логику обработки IP и ASN
 """
 import ipaddress
@@ -267,9 +267,10 @@ def load_asn_mmdb(file_path: str, logger=None) -> maxminddb.Reader:
         logger.error(f"Ошибка загрузки MMDB файла: {e}")
         raise
 
-def get_asn_info(ip: str, mmdb_reader: maxminddb.Reader, logger=None) -> Optional[Dict[str, Any]]:
+def get_asn_info(ip: str, mmdb_reader: maxminddb.Reader, field_mapping: Optional[Dict[str, Any]] = None, logger=None) -> Optional[Dict[str, Any]]:
     """
     Получает информацию об ASN для IP из MMDB базы.
+    Использует field_mapping для определения названий полей.
     Возвращает словарь с ключами: 'asn', 'org', 'country'
     """
     if logger is None:
@@ -297,11 +298,21 @@ def get_asn_info(ip: str, mmdb_reader: maxminddb.Reader, logger=None) -> Optiona
                 'country': 'XX'
             }
 
-       # Ключи для ip-to-asn.mmdb
+        # Определяет имена полей через маппинг или использует стандартные
+        if field_mapping:
+            asn_key = field_mapping.get('asn', {}).get('source_field', 'asn')
+            org_key = field_mapping.get('org', {}).get('source_field', 'org')
+            country_key = field_mapping.get('country_code', {}).get('source_field', 'country_code')
+        else:
+            asn_key = 'asn'
+            org_key = 'org'
+            country_key = 'country_code'
+
+        # Извлекаем данные с учетом маппинга полей
         asn_info = {
-            'asn': result.get('asn', 'ASUNKNOWN'),
-            'org': result.get('org', 'Unknown'),
-            'country': result.get('country_code', 'XX')
+            'asn': result.get(asn_key, 'ASUNKNOWN'),
+            'org': result.get(org_key, 'Unknown'),
+            'country': result.get(country_key, 'XX')
         }
 
         # Если ASN не начинается с "AS", добавит префикс
@@ -326,7 +337,9 @@ def process_ips_with_mmdb(
     ips: List[str],
     mmdb_reader: maxminddb.Reader,
     asn_filter: Optional[List[str]] = None,
-    country_filter: Optional[List[str]] = None,
+    country_include: Optional[List[str]] = None,
+    country_exclude: Optional[List[str]] = None,
+    field_mapping: Optional[Dict[str, Any]] = None,
     logger=None
 ) -> Tuple[Dict[Tuple[str, str, str], Dict[str, Any]], List[str], Dict[str, int]]:
     """
@@ -345,7 +358,7 @@ def process_ips_with_mmdb(
     asn_counter_all = defaultdict(int)
 
     for ip in ips:
-        asn_info = get_asn_info(ip, mmdb_reader)
+        asn_info = get_asn_info(ip, mmdb_reader, field_mapping)
 
         if not isinstance(asn_info, dict):
             no_asn_ips.append(ip)
@@ -363,9 +376,14 @@ def process_ips_with_mmdb(
             if asn not in asn_filter:
                 skip_filtered = True
 
-        # Если включен фильтр по стране
-        if country_filter:
-            if country not in country_filter:
+        # Если указаны страны в country_include
+        if country_include:
+            if country not in country_include:
+                skip_filtered = True
+
+        # ЕСЛИ указаны страны в country_exclude
+        if country_exclude:
+            if country in country_exclude:
                 skip_filtered = True
 
         # Если IP не проходит фильтры, пропускаем его для asn_group_map
@@ -607,7 +625,7 @@ def calculate_recommended_thresholds(
     p75 = int(np.percentile(arr, 75))
     p90 = int(np.percentile(arr, 90))
 
-    # Минимальная агрегация: хотя бы 2 IP
+    # Минимальная агрегация: 2 IP
     compact = max(2, p25)
 
     # Precise: используем p75 или p90, но c гарантией выше compact
@@ -652,7 +670,8 @@ def generate_json_report(
                 "dns_file_filter": config.get('dns_file_filter'),
                 "remove_last_seen": config.get('remove_last_seen'),
                 "asn_filter": config.get('asn_filter'),
-                "country_filter": config.get('country_filter'),
+                "country_include": config.get('country_include'),
+                "country_exclude": config.get('country_exclude'),
                 "prefix_threshold": prefix_threshold,
                 "report_generation": config.get('report_generation', False)
             }
@@ -884,10 +903,43 @@ def save_json_report(report_data: Dict[str, Any], output_path: Path, logger=None
         logger.error(f"Ошибка при сохранении JSON отчета: {e}")
         raise
 
+def load_mmdb_mapping(file_path: str, logger=None) -> Optional[Dict[str, Any]]:
+    """Загружает файл маппинга полей MMDB базы"""
+    if logger is None:
+        logger = logging.getLogger(__name__)
+
+    if not file_path or file_path.lower() == 'none':
+        logger.info("Использование стандартных полей MMDB базы")
+        return None
+
+    try:
+        abs_path = validate_file_path(file_path, "Файл маппинга MMDB")
+        with open(abs_path, 'r') as f:
+            mapping = json.load(f)
+
+        logger.info(f"Файл маппинга MMDB загружен: {abs_path}")
+
+        # Извлекаем только mapping для удобства использования
+        field_mapping = mapping.get('field_mapping', {})
+
+        # Проверяем наличие обязательных полей
+        required_fields = ['asn', 'country_code']
+        for field in required_fields:
+            if field not in field_mapping:
+                logger.warning(f"В маппинге отсутствует обязательное поле: {field}")
+
+        return field_mapping
+
+    except Exception as e:
+        logger.warning(f"Не удалось загрузить файл маппинга {file_path}: {e}")
+        logger.info("Будут использованы стандартные поля MMDB базы")
+        return None
+
 class IpAnalystCore:
     def __init__(self, config: Dict[str, Any], script_name: str = None):
        self.config = config
        self.script_name = script_name if script_name else Path(__file__).stem
+       self.field_mapping = None
 
        # Получаем логгер для ядра
        self.logger = logging.getLogger(self.script_name)
@@ -905,12 +957,15 @@ class IpAnalystCore:
             as_mmdb_path = config['asn_db_file']
             output_dir = config['output_dir']
             remove_last_seen = config['remove_last_seen']
-            country_filter_raw = config['country_filter']
+            country_include_raw = config['country_include']
+            country_exclude_raw = config.get('country_exclude', 'none')
             output_filename_config = config['output_filename']
             asn_filter_raw = config['asn_filter']
             prefix_threshold = config['prefix_threshold']
+            mapping_file_raw = config.get('mapping_file_path', 'none')
 
             # Преобразование параметров:
+            # Обработка asn_filter
             asn_filter = None
             if isinstance(asn_filter_raw, str) and asn_filter_raw.lower() == 'none':
                 asn_filter = None
@@ -918,26 +973,54 @@ class IpAnalystCore:
                 asn_filter = None
             else:
                 asn_filter = asn_filter_raw
-
-            country_filter = None
-            if isinstance(country_filter_raw, str) and country_filter_raw.lower() == 'none':
-                country_filter = None
-            elif isinstance(country_filter_raw, list) and len(country_filter_raw) == 0:
-                country_filter = None
+            # Обработка country_include
+            country_include = None
+            if isinstance(country_include_raw, str) and country_include_raw.lower() == 'none':
+                country_include = None
+            elif isinstance(country_include_raw, list) and len(country_include_raw) == 0:
+                country_include = None
             else:
-                country_filter = country_filter_raw
+                country_include = country_include_raw
+
+            # Обработка country_exclude
+            country_exclude = None
+            if isinstance(country_exclude_raw, str) and country_exclude_raw.lower() == 'none':
+                country_exclude = None
+            elif isinstance(country_exclude_raw, list) and len(country_exclude_raw) == 0:
+                country_exclude = None
+            else:
+                country_exclude = country_exclude_raw
+
+            # Обработка mapping_file_path
+            mapping_file_path = None
+            if isinstance(mapping_file_raw, str):
+                mapping_file_path = mapping_file_raw
+            elif isinstance(mapping_file_raw, list):
+                if len(mapping_file_raw) > 0:
+                    mapping_file_path = mapping_file_raw[0]  # берем первый элемент
+                else:
+                    mapping_file_path = 'none'
+            else:
+                mapping_file_path = 'none'
 
             ip_dirs_str = ip_list_dir if isinstance(ip_list_dir, str) else ', '.join(ip_list_dir)
             self.logger.info(f"Используемые пути и параметры:\n"
                            f"- Директории с IP списками: {ip_dirs_str}\n"
                            f"- DNS фильтр: {'Отключен' if dns_yaml_path.lower() == 'none' else dns_yaml_path}\n"
                            f"- ASN MMDB база: {as_mmdb_path}\n"
+                           f"- Файл маппинга полей: {'Стандартные поля' if mapping_file_path.lower() == 'none' else mapping_file_path}\n"
                            f"- Выходная директория: {output_dir}\n"
                            f"- Имя выходного файла/листа: {output_filename_config if output_filename_config != 'none' else 'По имени директории'}\n"
                            f"- Фильтр ASN: {asn_filter if asn_filter else 'Отключен'}\n"
-                           f"- Фильтр стран: {country_filter if country_filter else 'Отключен'}\n"
+                           f"- Включение стран: {country_include if country_include else 'Отключен'}\n"
+                           f"- Исключение стран: {country_exclude if country_exclude and len(country_exclude) > 0 else 'Отключено'}\n"
                            f"- Фильтр по времени: {f'{remove_last_seen} дней (применяется к JSON/YAML файлам)' if remove_last_seen is not None else 'Отключен'}\n"
                            f"- Генерация отчета: {'Включена' if config.get('report_generation', False) else 'Отключена'}\n")
+
+            # Загрузка файла маппинга
+            self.logger.info("Загрузка файла маппинга полей MMDB...")
+            self.field_mapping = load_mmdb_mapping(mapping_file_path, self.logger)
+
             # Загрузка данных из одного или нескольких путей
             self.logger.info("Загрузка исходных IP-адресов...")
 
@@ -972,7 +1055,9 @@ class IpAnalystCore:
                 sorted(unique_ips),
                 mmdb_reader,
                 asn_filter,
-                country_filter
+                country_include,
+                country_exclude,
+                self.field_mapping
             )
 
             # Статистика
@@ -1071,7 +1156,7 @@ class IpAnalystCore:
                         asn_group_map=asn_group_map,
                         no_asn_ips=no_asn_ips,
                         asn_counter_all=asn_counter,
-                        config=config,
+                        config={**config, 'field_mapping': self.field_mapping},
                         script_name=self.script_name,
                         output_filename_base=output_filename_base,
                         prefix_threshold=prefix_threshold,
@@ -1108,8 +1193,9 @@ class IpAnalystCore:
     def load_dns_ips(self, file_path: str) -> Set[str]:
         return load_dns_ips(file_path, self.logger)
 
-    def process_ips_with_mmdb(self, ips, mmdb_reader, asn_filter=None, country_filter=None):
-        return process_ips_with_mmdb(ips, mmdb_reader, asn_filter, country_filter, self.logger)
+    def process_ips_with_mmdb(self, ips, mmdb_reader, asn_filter=None, country_include=None, country_exclude=None, field_mapping=None):
+        mapping_to_use = field_mapping if field_mapping is not None else self.field_mapping
+        return process_ips_with_mmdb(ips, mmdb_reader, asn_filter, country_include, country_exclude, mapping_to_use, self.logger)
 
     def validate_directory(self, dir_path: str, dir_description: str) -> str:
         return validate_directory(dir_path, dir_description, self.logger)
