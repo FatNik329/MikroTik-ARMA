@@ -1,5 +1,5 @@
 """
-Скрипт для анализа логов DNS-запросов (dnscrypt-proxy), поиска активных доменов по шаблонам.
+Скрипт для анализа DNS-запросов (dnscrypt-proxy), поиска активных доменов по шаблонам.
 """
 
 # 1. Импорты
@@ -9,6 +9,7 @@ import logging
 import dns.resolver
 import mmap
 import time
+import requests
 from glob import glob
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -381,9 +382,11 @@ def resolve_domains_parallel(domains: list, dns_servers: list, timeout: float, c
         if domain not in failed_cache or failed_cache[domain] <= datetime.now()
     ]
 
+    total_domains = len(domains_to_resolve)
+
     # Параллельный режим отключен -> выполняется последовательный резолвинг
     if not parallel_config.get("enabled", False):
-        logger.debug("Параллельный режим отключен, выполняется последовательный резолвинг")
+        logger.debug(f"Параллельный режим отключен, последовательный резолвинг {total_domains} доменов")
         for domain in domains_to_resolve:
             try:
                 ips = resolve_domain(
@@ -397,17 +400,33 @@ def resolve_domains_parallel(domains: list, dns_servers: list, timeout: float, c
             except Exception as e:
                 logger.debug(f"Ошибка резолвинга {domain}: {str(e)}")
         return resolved
+        return resolved
 
     # Параллельный режим включен -> настройка параметров
     max_workers = parallel_config.get("max_workers", 4)
     batch_size = parallel_config.get("batch_size", 20)
     delay = parallel_config.get("delay", 0.3)
 
-    logger.info(f"Параллельный резолвинг (потоков: {max_workers}, пачки по {batch_size})")
+    # Определение размера пачки
+    if total_domains <= batch_size:
+        actual_batch_size = total_domains
+        num_batches = 1
+    else:
+        actual_batch_size = batch_size
+        num_batches = (total_domains + batch_size - 1) // batch_size
+
+    logger.info(f"Параллельный резолвинг: {total_domains} доменов, "
+                f"потоков: {max_workers}, "
+                f"пачек: {num_batches} по ~{actual_batch_size} доменов")
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        for i in range(0, len(domains_to_resolve), batch_size):
+        for i in range(0, total_domains, batch_size):
             batch = domains_to_resolve[i:i + batch_size]
+            batch_num = i // batch_size + 1
+
+            if num_batches > 1:
+                logger.debug(f"Пачка {batch_num}/{num_batches}: {len(batch)} доменов")
+
             futures = {}
 
             # Отправка пачки DNS запросов (резолвинг)
@@ -432,10 +451,10 @@ def resolve_domains_parallel(domains: list, dns_servers: list, timeout: float, c
                     logger.debug(f"Ошибка резолвинга {domain}: {str(e)}")
 
             # Задержка между пачками
-            if i + batch_size < len(domains_to_resolve):
+            if i + batch_size < total_domains:
                 time.sleep(delay)
 
-    logger.debug(f"Успешно разрешено: {len(resolved)}/{len(domains_to_resolve)}")
+    logger.debug(f"Успешно разрешено: {len(resolved)}/{total_domains}")
     return resolved
 
 def resolve_domain(domain: str, dns_servers: list, timeout: float, config: dict) -> dict:
@@ -516,6 +535,10 @@ def parse_query_log(log_path, domain_configs):
         log_files = [os.path.join(log_path, f) for f in os.listdir(log_path)
                     if f.endswith('.log') and os.path.isfile(os.path.join(log_path, f))]
         logger.info(f"Обнаружена директория логов. Файлы для обработки: {len(log_files)}")
+
+        # Вывод списка файлов журналов
+        for log_file in log_files:
+            logger.debug(f"  - {log_file} ({os.path.getsize(log_file)} байт)")
     else:
         log_files = [log_path]
         logger.info(f"Обработка одиночного файла: {log_path}")
@@ -525,80 +548,96 @@ def parse_query_log(log_path, domain_configs):
             logger.warning(f"Файл лога не найден, пропускаем: {log_file}")
             continue
 
+        logger.info(f"Старт обработки файла: {log_file}")
+
         file_line_count = 0
         file_match_count = 0
         file_wildcard_matches = 0
         file_malformed_lines = 0
 
-        with open(log_file, "r") as f:
-            mmapped_file = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
-            for line in iter(mmapped_file.readline, b""):
-                line = line.decode("utf-8").strip()
-                file_line_count += 1
-                total_line_count += 1
+        try:
+            with open(log_file, "r") as f:
+                logger.debug(f"Открыт файл {log_file}")
+                mmapped_file = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
 
-                try:
-                    if not line.startswith('['):
+                logger.debug(f"Чтение строк из {log_file}")
+
+                for line in iter(mmapped_file.readline, b""):
+                    file_line_count += 1
+                    total_line_count += 1
+
+                    # Вывод прочитанных строк, каждые 1000
+                    if file_line_count % 1000 == 0:
+                        logger.debug(f"Обработано {file_line_count} строк в файле {log_file}")
+
+                    line = line.decode("utf-8").strip()
+
+                    try:
+                        if not line.startswith('['):
+                            file_malformed_lines += 1
+                            total_malformed_lines += 1
+                            continue
+
+                        # Разделяет строку на части
+                        parts = line.split(']', 1)
+                        if len(parts) < 2:
+                            file_malformed_lines += 1
+                            total_malformed_lines += 1
+                            continue
+
+                        # Получает оставшуюся часть строки после даты
+                        rest = parts[1].strip().split()
+                        if len(rest) < 3:
+                            file_malformed_lines += 1
+                            total_malformed_lines += 1
+                            continue
+
+                        domain = rest[1].lower()
+                        record_type = rest[2].upper()
+
+                        if record_type not in ('A', 'AAAA'):
+                            continue
+
+                        # Обработка матчинга доменов
+                        for list_name, categories in domain_configs.items():
+                            for category, targets in categories.items():
+                                for target in targets:
+                                    if is_domain_match(domain, target):
+                                        is_wildcard = '*' in target
+
+                                        # Инициализация структуры результатов
+                                        if category not in results[list_name]:
+                                            results[list_name][category] = {
+                                                'domains': {},
+                                                'wildcards': set() if any('*' in t for t in targets) else None
+                                            }
+
+                                        # Сохраняет домен и шаблон, по которому он был обнаружен
+                                        if domain not in results[list_name][category]['domains']:
+                                            results[list_name][category]['domains'][domain] = {
+                                                'target_template': f"{category} -> {target}"
+                                            }
+
+                                        if is_wildcard:
+                                            file_wildcard_matches += 1
+                                            total_wildcard_matches += 1
+                                            if results[list_name][category]['wildcards'] is not None:
+                                                results[list_name][category]['wildcards'].add(domain)
+                                        file_match_count += 1
+                                        total_match_count += 1
+                                        break
+
+                    except Exception as e:
+                        logger.warning(f"Ошибка строки {file_line_count} в файле {log_file}: {e}")
                         file_malformed_lines += 1
                         total_malformed_lines += 1
-                        continue
 
-                    # Разделяет строку на части
-                    parts = line.split(']', 1)
-                    if len(parts) < 2:
-                        file_malformed_lines += 1
-                        total_malformed_lines += 1
-                        continue
+                mmapped_file.close()
+                logger.info(f"Файл {log_file} обработан: строк={file_line_count}, совпадений={file_match_count}, wildcards={file_wildcard_matches}")
 
-                    # Получает оставшуюся часть строки после даты
-                    rest = parts[1].strip().split()
-                    if len(rest) < 3:
-                        file_malformed_lines += 1
-                        total_malformed_lines += 1
-                        continue
-
-                    domain = rest[1].lower()
-                    record_type = rest[2].upper()
-
-                    if record_type not in ('A', 'AAAA'):
-                        continue
-
-                    for list_name, categories in domain_configs.items():
-                        for category, targets in categories.items():
-                            for target in targets:
-                                if is_domain_match(domain, target):
-                                    is_wildcard = '*' in target
-
-                                    # Инициализация структуры результатов
-                                    if category not in results[list_name]:
-                                        results[list_name][category] = {
-                                            'domains': {},
-                                            'wildcards': set() if any('*' in t for t in targets) else None
-                                        }
-
-                                    # Сохраняет домена и шаблона, по которому он был обнаружен
-                                    if domain not in results[list_name][category]['domains']:
-                                        results[list_name][category]['domains'][domain] = {
-                                            'target_template': f"{category} -> {target}"
-                                        }
-
-                                    if is_wildcard:
-                                        file_wildcard_matches += 1
-                                        total_wildcard_matches += 1
-                                        if results[list_name][category]['wildcards'] is not None:
-                                            results[list_name][category]['wildcards'].add(domain)
-                                    file_match_count += 1
-                                    total_match_count += 1
-                                    break
-
-                except Exception as e:
-                    logger.warning(f"Ошибка строки {file_line_count} в файле {log_file}: {e}")
-                    file_malformed_lines += 1
-                    total_malformed_lines += 1
-
-            mmapped_file.close()
-
-        logger.info(f"Файл {log_file}: строк={file_line_count}, совпадений={file_match_count}, wildcards={file_wildcard_matches}")
+        except Exception as e:
+            logger.error(f"Критическая ошибка при обработке файла {log_file}: {e}")
+            continue
 
     logger.info(f"Итого обработано файлов: {len(log_files)}")
     logger.info(f"Всего строк: {total_line_count}")
@@ -606,6 +645,98 @@ def parse_query_log(log_path, domain_configs):
     if total_malformed_lines > 0:
         logger.warning(f"Всего строк с неверным форматом: {total_malformed_lines}")
 
+    return results
+
+def get_recent_queries(config):
+    """Получает запросы из metrics API dnscrypt-proxy"""
+    metrics_config = config["dns_fwd"]["metrics"]
+    url = metrics_config["url"]
+    timeout = metrics_config.get("timeout", 10)
+    count = metrics_config.get("recent_count", 100)
+
+    # Аутентификация (опционально)
+    auth = None
+    if metrics_config.get("auth_user") and metrics_config.get("auth_pass"):
+        auth = (metrics_config["auth_user"], metrics_config["auth_pass"])
+
+    try:
+        response = requests.get(url, auth=auth, timeout=timeout)
+        response.raise_for_status()
+        data = response.json()
+
+        # Последние N записей
+        recent = data.get("recent_queries", [])
+        if not recent:
+            logger.warning("API metrics вернул пустой список recent_queries")
+            return []
+
+        # Ограничение количества
+        recent = recent[:count]
+
+        filtered = []
+        for q in recent:
+            query_type = q.get("type", "").upper()
+            if query_type in ("A", "AAAA"):
+                filtered.append({
+                    "domain": q.get("domain", "").lower(),
+                    "type": query_type,
+                    "timestamp": q.get("timestamp", "")
+                })
+
+        logger.info(f"Получено {len(filtered)} запросов из metrics API")
+        return filtered
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Ошибка подключения к API metrics: {e}")
+    except json.JSONDecodeError as e:
+        logger.error(f"Ошибка парсинга JSON из API: {e}")
+    except Exception as e:
+        logger.error(f"Неожиданная ошибка при получении метрик: {e}")
+
+    return []
+
+def process_queries_from_api(queries, domain_configs):
+    """Обрабатывает запросы из metrics API (аналогично parse_query_log)"""
+    results = {list_name: {} for list_name in domain_configs}
+    total_queries = len(queries)
+    total_matches = 0
+
+    if not queries:
+        return results
+
+    logger.info(f"Обработка {total_queries} запросов из metrics API...")
+
+    for query in queries:
+        domain = query["domain"]
+        query_type = query["type"]
+
+        for list_name, categories in domain_configs.items():
+            for category, targets in categories.items():
+                for target in targets:
+                    if is_domain_match(domain, target):
+                        is_wildcard = '*' in target
+
+                        # Инициализация структуры результатов
+                        if category not in results[list_name]:
+                            results[list_name][category] = {
+                                'domains': {},
+                                'wildcards': set() if any('*' in t for t in targets) else None
+                            }
+
+                        # Сохраняет домен и шаблон
+                        if domain not in results[list_name][category]['domains']:
+                            results[list_name][category]['domains'][domain] = {
+                                'target_template': f"{category} -> {target}"
+                            }
+
+                        if is_wildcard:
+                            if results[list_name][category]['wildcards'] is not None:
+                                results[list_name][category]['wildcards'].add(domain)
+
+                        total_matches += 1
+                        break
+
+    logger.info(f"Найдено совпадений: {total_matches}")
     return results
 
 def load_existing_results(file_path):
@@ -755,7 +886,7 @@ def save_results(results, dns_servers, timeout, config, domain_records):
                 config=config
             )
 
-            # Обработка отфильтрованных доменов
+            # Обрабатываем ТОЛЬКО отфильтрованные домены
             for domain in filtered_domains:
                 try:
                     is_wildcard = domain in wildcards_in_category if wildcards_in_category is not None else False
@@ -770,6 +901,8 @@ def save_results(results, dns_servers, timeout, config, domain_records):
                             "target_template": data['domains'][domain]['target_template']
                         }
 
+                        current_time = now.strftime("%Y-%m-%d %H:%M:%S")
+
                         # Обработка IPv4
                         if current_ips.get('ipv4'):
                             domain_data["ipv4"] = {
@@ -777,12 +910,18 @@ def save_results(results, dns_servers, timeout, config, domain_records):
                                 "historical": {}
                             }
 
+                            for ip in current_ips['ipv4']:
+                                domain_data["ipv4"]["historical"][ip] = current_time
+
                         # Обработка IPv6
                         if current_ips.get('ipv6'):
                             domain_data["ipv6"] = {
                                 "current": current_ips['ipv6'],
                                 "historical": {}
                             }
+
+                            for ip in current_ips['ipv6']:
+                                domain_data["ipv6"]["historical"][ip] = current_time
 
                         if is_idn:
                             idn_name = decode_idn(domain)
@@ -851,17 +990,18 @@ def save_results(results, dns_servers, timeout, config, domain_records):
                         # Обработка IPv4 и IPv6 historical данных
                         for ip_type in ["ipv4", "ipv6"]:
                             if old_data.get(ip_type) and merged_data.get(ip_type):
-                                # Инициализирует historical
+                                # Инициализируем historical, если его нет
                                 if "historical" not in merged_data[ip_type]:
                                     merged_data[ip_type]["historical"] = {}
 
-                                # Копирует исторические данные из старых результатов
+                                # Копируем исторические данные из старых результатов
                                 if "historical" in old_data[ip_type]:
                                     for historical_ip, ip_timestamp in old_data[ip_type]["historical"].items():
+                                        # Не перезаписываем более свежие записи
                                         if historical_ip not in merged_data[ip_type]["historical"]:
                                             merged_data[ip_type]["historical"][historical_ip] = ip_timestamp
 
-                                # Добавляет текущие IP в historical с текущим временем
+                                # Добавляем текущие IP в historical с текущим временем
                                 for current_ip in merged_data[ip_type]["current"]:
                                     merged_data[ip_type]["historical"][current_ip] = current_time
 
@@ -951,7 +1091,6 @@ def save_results(results, dns_servers, timeout, config, domain_records):
         logger.info("\n=== Обработка завершена успешно! ===")
 
 # 5. Точка входа
-
 def main():
     try:
         config, address_lists, domain_configs, domain_records = load_configs()
@@ -985,49 +1124,49 @@ def main():
         # Загрузка кэша
         failed_cache = load_failed_cache(config)
 
-        log_path = config["dns_fwd"]["logging"]["query_log_path"]
+        # Определяем источник данных
+        data_source = config["dns_fwd"].get("data_source", "logs")
+        logger.info(f"Источник данных: {data_source}")
 
-        # Проверка существования пути (файла или директории)
-        if not os.path.exists(log_path):
-            logger.error(f"Путь не найден: {log_path}")
-            return
-
-        # Проверка формата для одиночного файла
-        if os.path.isfile(log_path):
-            if not validate_log_format(log_path):
-                logger.error(
-                    "Файл лога не соответствует ожидаемому формату!\n"
-                    "Ожидаемый формат каждой строки:\n"
-                    "[YYYY-MM-DD HH:MM:SS] IP ДОМЕН ТИП_ЗАПРОСА СТАТУС ВРЕМЯ СЕРВЕР\n"
-                    "Пример:\n"
-                    "[2025-07-27 16:31:57] 172.1.1.2 steamcontent.com A PASS 2ms -"
-                )
+        if data_source == "metrics":
+            # Данные из API
+            queries = get_recent_queries(config)
+            if not queries:
+                logger.warning("Не удалось получить данные из metrics, завершение работы")
                 return
+            results = process_queries_from_api(queries, domain_configs)
         else:
-            # Для директории проверяем первый найденный .log файл
-            log_files = [os.path.join(log_path, f) for f in os.listdir(log_path)
-                        if f.endswith('.log') and os.path.isfile(os.path.join(log_path, f))]
-            if log_files:
-                sample_file = log_files[0]
-                if not validate_log_format(sample_file):
-                    logger.error(
-                        f"Файл лога {sample_file} не соответствует ожидаемому формату!\n"
-                        "Ожидаемый формат каждой строки:\n"
-                        "[YYYY-MM-DD HH:MM:SS] IP ДОМЕН ТИП_ЗАПРОСА СТАТУС ВРЕМЯ СЕРВЕР\n"
-                        "Пример:\n"
-                        "[2025-07-27 16:31:57] 172.1.1.2 steamcontent.com A PASS 2ms -"
-                    )
+            # Данные из лог журналов
+            log_path = config["dns_fwd"]["logging"]["query_log_path"]
+
+            if not os.path.exists(log_path):
+                logger.error(f"Путь не найден: {log_path}")
+                return
+
+            if os.path.isfile(log_path):
+                if not validate_log_format(log_path):
+                    logger.error("Файл лога не соответствует ожидаемому формату!")
                     return
             else:
-                logger.error(f"В директории {log_path} не найдено .log файлов")
-                return
+                # Проверка формата для директории
+                log_files = [os.path.join(log_path, f) for f in os.listdir(log_path)
+                            if f.endswith('.log') and os.path.isfile(os.path.join(log_path, f))]
+                if log_files:
+                    sample_file = log_files[0]
+                    if not validate_log_format(sample_file):
+                        logger.error(f"Файл лога {sample_file} не соответствует формату!")
+                        return
+                else:
+                    logger.error(f"В директории {log_path} не найдено .log файлов")
+                    return
 
-        results = parse_query_log(log_path, domain_configs)
+            results = parse_query_log(log_path, domain_configs)
 
         # Анализ дубликатов
         logger.info("\n=== Анализ дубликатов шаблонов ===")
         duplicates = analyze_duplicates(domain_records)
 
+        # Сохранение результатов
         save_results(
             results=results,
             dns_servers=available_servers,
