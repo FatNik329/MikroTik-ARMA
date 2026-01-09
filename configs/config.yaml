@@ -100,6 +100,13 @@ main_start:
 # Настройки скрипта dns_fwd.py
 # ============================
 dns_fwd:
+  data_source: "logs"  # Источник получения данных: logs -> файлы-журналы | metrics -> API
+  metrics:             # Раздел настроек режима 'metrics'
+    url: "http://localhost:8080/api/metrics" # Адрес API
+    auth_user: "myuser"  # опционально, null - без auth user
+    auth_pass: "mypassword-user"  # опционально, null - без auth pass
+    recent_count: 100  # Количество последних записей (по умолч. отдаёт dnscrypt-proxy -> 100)
+    timeout: 10 # время без ответа API
 
   logging:
     query_log_path: "/path/to/dnscrypt/logs/query.log"  # Основной путь до лог файла DNSCrypt
@@ -114,8 +121,8 @@ dns_fwd:
     ttl_failed_resolve: "1d"     # Период хранения кэша для доменов, которые не отрезолвились (1d/5d/2w/1m:day/week/month)
     parallel:
       enabled: false             # Включить параллельную обработку (true/false)
-      max_workers: 4             # Общее число потоков
-      batch_size: 50             # Доменов за раз
+      max_workers: 5             # Общее число потоков
+      batch_size: 10             # Доменов за раз
       delay: 0.2                 # Задержка между пачками (сек.)
     timeout: 3
 
@@ -123,7 +130,7 @@ dns_fwd:
     retention_days_domain: "14d"  # Количество дней хранить неактивные домены
     retention_days_ips: "7d"      # Количество дней хранить неактиные (historical) IP доменов
     backup_files: 2               # Количество backup-копий
-    skip_duplicates: false         # Пропускать дубликаты шаблонов при формировании results-dns.yaml (true/false)
+    skip_duplicates: false         # Пропускать дубликаты шаблонов при формировании results-dns.yaml (true - не пропускать/false - пропускать) 
 
 # Настройки скрипта fetch_as_prefixes.py
 # ======================================
