@@ -760,27 +760,19 @@ def save_results(results, dns_servers, timeout, config, domain_records):
         return None
 
     def is_idn_domain(domain):
-        """
-        Проверяет, является ли домен IDN (содержит не-ASCII символы
-        или представлен в Punycode).
-        """
         if not isinstance(domain, str):
             return False
-
-        # 1. Если домен не содержит ASCII символы (Unicode) -> IDN
         if any(ord(char) > 127 for char in domain):
             return True
-
-        # 2. Если домен представлен в Punycode (содержит 'xn--') - это тоже IDN.
         if 'xn--' in domain:
             return True
+        return False
 
     retention_days_domain = parse_timedelta(config["dns_fwd"]["storage_raw_data"]["retention_days_domain"]).days
     retention_days_ips = parse_timedelta(config["dns_fwd"]["storage_raw_data"]["retention_days_ips"]).days
     backup_files = config["dns_fwd"]["storage_raw_data"]["backup_files"]
     skip_duplicates = config["dns_fwd"]["storage_raw_data"].get("skip_duplicates", False)
 
-    # Получение списка дубликатов
     duplicates = {domain: records for domain, records in domain_records.items()
                  if len(records) > 1}
 
@@ -797,25 +789,20 @@ def save_results(results, dns_servers, timeout, config, domain_records):
     if not duplicates:
         logger.info("✔ Дубликатов не обнаружено.")
     else:
-        total_duplicates = len(duplicates)  # Подсчёт уникальных дубликатов
-        duplicate_entries = sum(len(records) for records in duplicates.values())  # Все вхождения
+        total_duplicates = len(duplicates)
+        duplicate_entries = sum(len(records) for records in duplicates.values())
         affected_files = set(
             record["file"] for records in duplicates.values() for record in records
         )
-
         logger.warning(
             f"Всего дубликатов: {total_duplicates} (в {len(affected_files)} файлах)"
         )
-
         if skip_duplicates:
             logger.warning("[!] Режим skip_duplicates=True - дубликаты исключены из результатов (в пределах конкретного Address List)")
         else:
             logger.info("[✓] Режим skip_duplicates=False - дубликаты включены в результаты")
 
     for list_name, categories in results.items():
-        if not categories:
-            continue
-
         list_stats = {
             'domains': 0,
             'idn': 0,
@@ -831,9 +818,11 @@ def save_results(results, dns_servers, timeout, config, domain_records):
         output_dir.mkdir(parents=True, exist_ok=True)
         result_file = output_dir / "results-dns.yaml"
 
+        # Загружает существующие данные
         existing_data = load_existing_results(result_file)
         now = datetime.now()
 
+        # Инициализирует new_data с метаданными
         new_data = OrderedDict([
             ("meta", {
                 "generated_at": now.strftime("%Y-%m-%d %H:%M:%S"),
@@ -845,196 +834,207 @@ def save_results(results, dns_servers, timeout, config, domain_records):
             ("categories", {})
         ])
 
-        for category, data in categories.items():
-            if not data or not data.get('domains'):
-                continue
+        # 1. Копируем все старые категории (даже, если их нет в новых результатах)
+        if "categories" in existing_data:
+            for old_category, old_domains in existing_data["categories"].items():
+                if old_category not in new_data["categories"]:
+                    new_data["categories"][old_category] = {}
 
-            merged_domains = {}
-            wildcards_in_category = data.get('wildcards', set()) or set()
-
-            # Инициализация категории в новых данных
-            new_data["categories"][category] = {}
-
-            skipped_duplicates_in_current_list = []
-
-            # Сначала собираем ВСЕ домены для этой категории
-            all_domains_in_category = list(data['domains'].keys())
-
-            # Фильтрация доменов с учетом skip_duplicates в конкретном {list_name}
-            filtered_domains = []
-            for domain in all_domains_in_category:
-                if skip_duplicates and domain in processed_domains_in_current_list:
-                    list_stats['skipped_duplicates'] += 1
-                    skipped_duplicates_in_current_list.append(domain)
-                    continue
-
-                processed_domains_in_current_list[domain] = True
-                filtered_domains.append(domain)
-
-            if skipped_duplicates_in_current_list:
-                logger.info(f"Список {list_name}/{category}: пропущено {len(skipped_duplicates_in_current_list)} дубликатов")
-
-            # Если после фильтрации не осталось доменов - пропускаем категорию
-            if not filtered_domains:
-                continue
-
-            # Параллельный резолвинг отфильтрованных доменов
-            resolved_ips = resolve_domains_parallel(
-                domains=filtered_domains,
-                dns_servers=dns_servers,
-                timeout=timeout,
-                config=config
-            )
-
-            # Обрабатываем ТОЛЬКО отфильтрованные домены
-            for domain in filtered_domains:
-                try:
-                    is_wildcard = domain in wildcards_in_category if wildcards_in_category is not None else False
-                    is_idn = is_idn_domain(domain)
-
-                    current_ips = resolved_ips.get(domain, {})
-                    if current_ips:
-                        # Формирование results-dns.yaml
-                        domain_data = {
-                            "active": True,
-                            "last_seen": now.strftime("%Y-%m-%d %H:%M:%S"),
-                            "target_template": data['domains'][domain]['target_template']
-                        }
-
-                        current_time = now.strftime("%Y-%m-%d %H:%M:%S")
-
-                        # Обработка IPv4
-                        if current_ips.get('ipv4'):
-                            domain_data["ipv4"] = {
-                                "current": current_ips['ipv4'],
-                                "historical": {}
-                            }
-
-                            for ip in current_ips['ipv4']:
-                                domain_data["ipv4"]["historical"][ip] = current_time
-
-                        # Обработка IPv6
-                        if current_ips.get('ipv6'):
-                            domain_data["ipv6"] = {
-                                "current": current_ips['ipv6'],
-                                "historical": {}
-                            }
-
-                            for ip in current_ips['ipv6']:
-                                domain_data["ipv6"]["historical"][ip] = current_time
-
-                        if is_idn:
-                            idn_name = decode_idn(domain)
-                            if idn_name:
-                                domain_data["idn_name"] = idn_name
-                                list_stats['idn'] += 1
-
-                        if is_wildcard:
-                            list_stats['wildcards'] += 1
-
-                        merged_domains[domain] = domain_data
-                        list_stats['domains'] += 1
-
-                except Exception as e:
-                    logger.error(f"Ошибка обработки {domain}: {e}")
-
-            # Добавление исторических данных (без дубликатов)
-            removed_in_category = 0
-            removed_ips_in_category = 0
-
-            # Сначала собираем ВСЕ домены из старых данных для этой категории
-            old_domains_in_category = existing_data.get("categories", {}).get(category, {})
-
-            for domain, old_data in old_domains_in_category.items():
-                if domain in merged_domains:
-                    continue
-
-                # Если включен skip_duplicates и это дубликат в текущем списке - пропускаем
-               # if skip_duplicates and domain in skipped_duplicates_in_current_list:
-                #    continue
-
-                # Обработка устаревших доменов (которых нет в текущих результатах)
-                try:
-                    last_seen = old_data.get("last_seen")
-                    if last_seen:
-                        last_date = datetime.strptime(last_seen, "%Y-%m-%d %H:%M:%S")
-                        if (now - last_date).days <= retention_days_domain:
-                            merged_data = {
-                                "active": False,
-                                "last_seen": last_seen
-                            }
-                            # Сохранение IP с историческими данными
-                            if old_data.get("ipv4"):
-                                merged_data["ipv4"] = old_data["ipv4"]
-                            if old_data.get("ipv6"):
-                                merged_data["ipv6"] = old_data["ipv6"]
-                            # Сохранение шаблона и IDN-имени
-                            if "target_template" in old_data:
-                                merged_data["target_template"] = old_data["target_template"]
-                            if "idn_name" in old_data:
-                                merged_data["idn_name"] = old_data["idn_name"]
-                            merged_domains[domain] = merged_data
-                        else:
-                            removed_in_category += 1
-                except Exception as e:
-                    logger.warning(f"Ошибка обработки исторических данных домена: {e}")
-
-            # Отдельно обрабатывает historical данные для доменов, которые есть и в старых, и в новых результатах
-            for domain in list(merged_domains.keys()):
-                if domain in old_domains_in_category:
+                # Копирует старые домены с проверкой retention
+                for domain, old_domain_data in old_domains.items():
                     try:
-                        merged_data = merged_domains[domain]
-                        old_data = old_domains_in_category[domain]
-                        current_time = now.strftime("%Y-%m-%d %H:%M:%S")
+                        last_seen = old_domain_data.get("last_seen")
+                        if last_seen:
+                            last_date = datetime.strptime(last_seen, "%Y-%m-%d %H:%M:%S")
+                            days_passed = (now - last_date).days
 
-                        # Обработка IPv4 и IPv6 historical данных
-                        for ip_type in ["ipv4", "ipv6"]:
-                            if old_data.get(ip_type) and merged_data.get(ip_type):
-                                # Инициализируем historical, если его нет
-                                if "historical" not in merged_data[ip_type]:
-                                    merged_data[ip_type]["historical"] = {}
+                            if days_passed <= retention_days_domain:
+                                # Копирует старый домен, с пометкой неактивный
+                                domain_data_copy = dict(old_domain_data)
+                                domain_data_copy["active"] = False
+                                new_data["categories"][old_category][domain] = domain_data_copy
+                            else:
+                                # Устарел - удалить
+                                list_stats['removed_domains'] += 1
+                                total_stats['removed_domains'] += 1
+                                logger.debug(f"Устаревший домен удалён: {domain} (прошло {days_passed} дней)")
+                        else:
+                            # Если нет last_seen, сохраняет с текущим временем
+                            domain_data_copy = dict(old_domain_data)
+                            domain_data_copy["last_seen"] = now.strftime("%Y-%m-%d %H:%M:%S")
+                            domain_data_copy["active"] = False
+                            new_data["categories"][old_category][domain] = domain_data_copy
+                    except Exception as e:
+                        logger.warning(f"Ошибка обработки старого домена {domain}: {e}")
 
-                                # Копируем исторические данные из старых результатов
-                                if "historical" in old_data[ip_type]:
-                                    for historical_ip, ip_timestamp in old_data[ip_type]["historical"].items():
-                                        # Не перезаписываем более свежие записи
-                                        if historical_ip not in merged_data[ip_type]["historical"]:
-                                            merged_data[ip_type]["historical"][historical_ip] = ip_timestamp
+        # 2. Обрабатывает новые результаты (если имеются)
+        if categories:
+            logger.debug(f"Обработка новых результатов для списка {list_name}")
 
-                                # Добавляем текущие IP в historical с текущим временем
-                                for current_ip in merged_data[ip_type]["current"]:
-                                    merged_data[ip_type]["historical"][current_ip] = current_time
+            for category, data in categories.items():
+                if not data or not data.get('domains'):
+                    logger.debug(f"Категория {category} пустая, пропускаем")
+                    continue
 
-                                # Удаление устаревших IP
-                                ips_to_remove = []
-                                for historical_ip, ip_timestamp in merged_data[ip_type]["historical"].items():
-                                    try:
-                                        ip_date = datetime.strptime(ip_timestamp, "%Y-%m-%d %H:%M:%S")
-                                        if (now - ip_date).days > retention_days_ips:
-                                            ips_to_remove.append(historical_ip)
-                                            removed_ips_in_category += 1
-                                    except Exception as e:
-                                        logger.warning(f"Ошибка парсинга timestamp IP {historical_ip}: {e}")
-                                        ips_to_remove.append(historical_ip)
+                # Инициализирует категорию, если новая
+                if category not in new_data["categories"]:
+                    new_data["categories"][category] = {}
 
-                                for ip_to_remove in ips_to_remove:
-                                    merged_data[ip_type]["historical"].pop(ip_to_remove, None)
+                merged_domains = {}
+                wildcards_in_category = data.get('wildcards', set()) or set()
+
+                # Собирает домены для обрабатываемой категории из новых результатов
+                all_domains_in_category = list(data['domains'].keys())
+
+                # Фильтрация доменов с учетом skip_duplicates
+                filtered_domains = []
+                for domain in all_domains_in_category:
+                    if skip_duplicates and domain in processed_domains_in_current_list:
+                        list_stats['skipped_duplicates'] += 1
+                        continue
+                    processed_domains_in_current_list[domain] = True
+                    filtered_domains.append(domain)
+
+                if skip_duplicates and list_stats['skipped_duplicates'] > 0:
+                    logger.info(f"Список {list_name}/{category}: пропущено {list_stats['skipped_duplicates']} дубликатов")
+
+                # Если нет доменов после фильтрации - перейти к следующей категории
+                if not filtered_domains:
+                    continue
+
+                # Резолвинг отфильтрованных доменов
+                resolved_ips = resolve_domains_parallel(
+                    domains=filtered_domains,
+                    dns_servers=dns_servers,
+                    timeout=timeout,
+                    config=config
+                )
+
+                # Обрабатывает отфильтрованные домены
+                for domain in filtered_domains:
+                    try:
+                        is_wildcard = domain in wildcards_in_category if wildcards_in_category is not None else False
+                        is_idn = is_idn_domain(domain)
+
+                        current_ips = resolved_ips.get(domain, {})
+                        if current_ips:
+                            # Формирует данные домена
+                            domain_data = {
+                                "active": True,
+                                "last_seen": now.strftime("%Y-%m-%d %H:%M:%S"),
+                                "target_template": data['domains'][domain]['target_template']
+                            }
+
+                            current_time = now.strftime("%Y-%m-%d %H:%M:%S")
+
+                            # Обработка IPv4
+                            if current_ips.get('ipv4'):
+                                domain_data["ipv4"] = {
+                                    "current": current_ips['ipv4'],
+                                    "historical": {}
+                                }
+                                for ip in current_ips['ipv4']:
+                                    domain_data["ipv4"]["historical"][ip] = current_time
+
+                            # Обработка IPv6
+                            if current_ips.get('ipv6'):
+                                domain_data["ipv6"] = {
+                                    "current": current_ips['ipv6'],
+                                    "historical": {}
+                                }
+                                for ip in current_ips['ipv6']:
+                                    domain_data["ipv6"]["historical"][ip] = current_time
+
+                            if is_idn:
+                                idn_name = decode_idn(domain)
+                                if idn_name:
+                                    domain_data["idn_name"] = idn_name
+                                    list_stats['idn'] += 1
+
+                            if is_wildcard:
+                                list_stats['wildcards'] += 1
+
+                            merged_domains[domain] = domain_data
+                            list_stats['domains'] += 1
 
                     except Exception as e:
-                        logger.warning(f"Ошибка обработки historical IP для {domain}: {e}")
+                        logger.error(f"Ошибка обработки {domain}: {e}")
 
-            total_stats['removed_domains'] += removed_in_category
-            total_stats['removed_ips'] += removed_ips_in_category
-            if removed_in_category > 0:
-                logger.debug(f"Категория {category}: удалено {removed_in_category} устаревших доменов")
-            if removed_ips_in_category > 0:
-                logger.debug(f"Категория {category}: удалено {removed_ips_in_category} устаревших IP")
+                # 3. Объединяет с существующими данными для обрабатываемой категории
+                if category in new_data["categories"]:
+                    # Обновляет существующие домены
+                    for domain, new_domain_data in merged_domains.items():
+                        new_data["categories"][category][domain] = new_domain_data
 
-            new_data["categories"][category] = merged_domains
+                    # Обновляет historical IP доменов
+                    for domain, domain_data in new_data["categories"][category].items():
+                        if domain in merged_domains:
+                            new_domain_data = merged_domains[domain]
 
-        # Сохранение данных
+                            # Обновляет historical IP из старых данных
+                            if domain in existing_data.get("categories", {}).get(category, {}):
+                                old_domain_data = existing_data["categories"][category][domain]
+
+                                # Объединяет historical IPv4
+                                if old_domain_data.get("ipv4") and new_domain_data.get("ipv4"):
+                                    if "historical" not in new_domain_data["ipv4"]:
+                                        new_domain_data["ipv4"]["historical"] = {}
+
+                                    # Копирует старые historical IP
+                                    if "historical" in old_domain_data["ipv4"]:
+                                        for ip, timestamp in old_domain_data["ipv4"]["historical"].items():
+                                            if ip not in new_domain_data["ipv4"]["historical"]:
+                                                new_domain_data["ipv4"]["historical"][ip] = timestamp
+
+                                    # Добавляет текущие IP
+                                    for ip in new_domain_data["ipv4"]["current"]:
+                                        new_domain_data["ipv4"]["historical"][ip] = current_time
+
+                                    # Удаляет устаревшие IP (IPv4, IPv6)
+                                    ips_to_remove = []
+                                    for ip, timestamp in new_domain_data["ipv4"]["historical"].items():
+                                        try:
+                                            ip_date = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
+                                            if (now - ip_date).days > retention_days_ips:
+                                                ips_to_remove.append(ip)
+                                                list_stats['removed_ips'] += 1
+                                        except Exception:
+                                            ips_to_remove.append(ip)
+
+                                    for ip in ips_to_remove:
+                                        new_domain_data["ipv4"]["historical"].pop(ip, None)
+
+                                if old_domain_data.get("ipv6") and new_domain_data.get("ipv6"):
+                                    if "historical" not in new_domain_data["ipv6"]:
+                                        new_domain_data["ipv6"]["historical"] = {}
+
+                                    if "historical" in old_domain_data["ipv6"]:
+                                        for ip, timestamp in old_domain_data["ipv6"]["historical"].items():
+                                            if ip not in new_domain_data["ipv6"]["historical"]:
+                                                new_domain_data["ipv6"]["historical"][ip] = timestamp
+
+                                    for ip in new_domain_data["ipv6"]["current"]:
+                                        new_domain_data["ipv6"]["historical"][ip] = current_time
+
+                                    ips_to_remove = []
+                                    for ip, timestamp in new_domain_data["ipv6"]["historical"].items():
+                                        try:
+                                            ip_date = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
+                                            if (now - ip_date).days > retention_days_ips:
+                                                ips_to_remove.append(ip)
+                                                list_stats['removed_ips'] += 1
+                                        except Exception:
+                                            ips_to_remove.append(ip)
+
+                                    for ip in ips_to_remove:
+                                        new_domain_data["ipv6"]["historical"].pop(ip, None)
+
+                else:
+                    new_data["categories"][category] = merged_domains
+
+        # 4. Сохраняем данные
         if new_data["categories"]:
-            # Ротация бэкапов в raw-data
+            # Ротация бэкапов
             if backup_files > 0 and result_file.exists():
                 backup_dir = output_dir / "backups"
                 backup_dir.mkdir(exist_ok=True)
@@ -1048,9 +1048,8 @@ def save_results(results, dns_servers, timeout, config, domain_records):
 
             # Сохранение новых данных
             with open(result_file, "w") as f:
-                # Преобразует OrderedDict в обычный dict перед сохранением
-               data_to_save = convert_ordered_dict(new_data)
-               yaml.dump(data_to_save, f, sort_keys=False, allow_unicode=True)
+                data_to_save = convert_ordered_dict(new_data)
+                yaml.dump(data_to_save, f, sort_keys=False, allow_unicode=True)
 
             total_stats['lists'] += 1
             total_stats['domains'] += list_stats['domains']
@@ -1064,6 +1063,8 @@ def save_results(results, dns_servers, timeout, config, domain_records):
                 f"IDN: {list_stats['idn']} | "
                 f"Wildcards: {list_stats['wildcards']} "
             )
+        else:
+            logger.warning(f"Список {list_name}: нет данных для сохранения")
 
     # Итоговый отчет
     logger.info("\n=== Итоговая статистика ===")
@@ -1074,16 +1075,10 @@ def save_results(results, dns_servers, timeout, config, domain_records):
     logger.info(f"Удалено устаревших доменов: {total_stats['removed_domains']}")
     logger.info(f"Удалено устаревших IP: {total_stats['removed_ips']}")
 
-    # Вывод общей информации по дубликатам
     if not skip_duplicates:
         logger.info("\n=== Дублирующиеся шаблоны ===")
         if not duplicates:
             logger.info("✔ Дубликатов не обнаружено.")
-        else:
-            total_duplicates = sum(len(records) for records in duplicates.values())
-            affected_files = set(
-                record["file"] for records in duplicates.values() for record in records
-            )
 
     if total_stats['lists'] == 0:
         logger.warning("Нет данных для сохранения! Проверьте шаблоны поиска.")
