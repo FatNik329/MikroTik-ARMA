@@ -12,6 +12,7 @@
 [![RIPEstat](https://img.shields.io/badge/RIPEstat-page-darkblue)](https://stat.ripe.net)
 [![bgp.tools](https://img.shields.io/badge/bgp.tools-page-darkred)](https://bgp.tools)
 [![IPLocate](https://img.shields.io/badge/IPLocate-page-000022)](https://www.iplocate.io)
+[![IPinfo](https://img.shields.io/badge/IPinfo-page-00b7e1)](https://ipinfo.io)
 [![IANA](https://img.shields.io/badge/IANA-page-56b622)](https://www.iana.org)
 ![Russia](https://img.shields.io/badge/ru-Russia-white)
 
@@ -71,7 +72,9 @@
 2. **Анализ и обогащение IP-адресов (Geo-ASN)**
    * Объединение IP-адресов из нескольких источников ARMA (TXT, JSON, YAML).
    * Исключение адресов, уже присутствующих в DNS-записях системы.
-   * Сопоставление оставшихся IP с автономными системами (ASN) и их префиксами с использованием MMDB-базы данных [IPLocate](https://www.iplocate.io).
+   * Сопоставление оставшихся IP с автономными системами (ASN) и их префиксами с использованием MMDB-базы сервисов:
+     * [IPLocate](https://www.iplocate.io)
+     * [IPinfo](https://ipinfo.io)
 3. **Парсер доменов верхнего уровня**
    * Автоматический сбор и поддержка в актуальном состоянии полного списка TLD с официального реестра [IANA](https://www.iana.org/domains/root/db).
    * Преобразование сырых данных в структурированный формат для использования другими модулями системы.
