@@ -4,6 +4,7 @@ cffi==2.0.0
 charset-normalizer==3.4.2
 cryptography==46.0.1
 dnspython==2.8.0
+exabgp==5.0.1
 idna==3.11
 invoke==2.2.0
 json5==0.12.1
