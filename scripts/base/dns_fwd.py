@@ -10,6 +10,8 @@ import dns.resolver
 import mmap
 import time
 import requests
+import tempfile
+import shutil
 from glob import glob
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -33,6 +35,34 @@ def convert_ordered_dict(obj):
         return [convert_ordered_dict(item) for item in obj]
     else:
         return obj
+
+def safe_yaml_dump(data, filepath, logger):
+    """Cохранение YAML (results-dns.yaml) с атомарной записью"""
+    try:
+        # Создает временный файл рядом с results-dns.yaml
+        dirname = os.path.dirname(filepath)
+        if dirname and not os.path.exists(dirname):
+            os.makedirs(dirname, exist_ok=True)
+
+        with tempfile.NamedTemporaryFile(
+            mode='w',
+            encoding='utf-8',
+            dir=dirname,
+            delete=False,
+            suffix='.tmp',
+            prefix='tmp_'
+        ) as tmp:
+            yaml.dump(data, tmp, sort_keys=False, allow_unicode=True)
+            tmp_name = tmp.name
+
+        # Атомарная замена файла
+        shutil.move(tmp_name, filepath)
+        logger.debug(f"Файл сохранен атомарно: {filepath}")
+
+    except Exception as e:
+        logger.error(f"Ошибка безопасного сохранения {filepath}: {e}")
+        with open(filepath, 'w', encoding='utf-8') as f:
+            yaml.dump(data, f, sort_keys=False, allow_unicode=True)
 
 def validate_log_format(log_file):
     """Проверяет соответствие формата лога (dnscrypt-proxy) ожидаемому шаблону"""
@@ -147,8 +177,7 @@ def save_failed_cache(cache, config):
         cache_data = {domain: expiry.strftime("%Y-%m-%d %H:%M:%S")
                      for domain, expiry in cache.items()}
 
-        with open(cache_file, "w") as f:
-            yaml.dump(cache_data, f)
+        safe_yaml_dump(cache_data, cache_file, logger)
 
         logger.debug(f"Сохранено {len(cache_data)} записей в кэш")
     except Exception as e:
@@ -742,8 +771,48 @@ def process_queries_from_api(queries, domain_configs):
 def load_existing_results(file_path):
     """Загружает существующие результаты или возвращает пустую структуру"""
     if os.path.exists(file_path):
-        with open(file_path, "r") as f:
-            return yaml.safe_load(f) or {}
+        try:
+            with open(file_path, "rb") as f:
+                content = f.read()
+
+                null_count = content.count(b'\x00')
+                if null_count > 0:
+                    logger.warning(f"Файл {file_path} содержит {null_count} нулевых символов, удалить")
+
+                content = content.replace(b'\x00', b'')
+                content = content.decode('utf-8', errors='ignore')
+
+                return yaml.safe_load(content) or {}
+
+        except yaml.YAMLError as e:
+
+            logger.error(f"Ошибка парсинга YAML в {file_path}: {e}")
+
+            if hasattr(e, 'problem_mark'):
+                mark = e.problem_mark
+                logger.error(f"Проблема в строке {mark.line + 1}, колонка {mark.column + 1}")
+
+                lines = content.split('\n')
+                start = max(0, mark.line - 3)
+                end = min(len(lines), mark.line + 3)
+                logger.error("Контекст вокруг ошибки:")
+                for i in range(start, end):
+                    prefix = ">>> " if i == mark.line else "    "
+                    logger.error(f"{prefix}{i+1}: {lines[i]}")
+
+            logger.warning("Возвращена пустая структура из-за ошибки YAML")
+            return {
+                "meta": {},
+                "categories": {}
+            }
+
+        except Exception as e:
+            logger.error(f"Ошибка загрузки файла результатов {file_path}: {e}")
+            return {
+                "meta": {},
+                "categories": {}
+            }
+
     return {
         "meta": {},
         "categories": {}
@@ -1046,10 +1115,9 @@ def save_results(results, dns_servers, timeout, config, domain_records):
                     backup_data = convert_ordered_dict(existing_data)
                     yaml.dump(backup_data, f, sort_keys=False, allow_unicode=True)
 
-            # Сохранение новых данных
-            with open(result_file, "w") as f:
-                data_to_save = convert_ordered_dict(new_data)
-                yaml.dump(data_to_save, f, sort_keys=False, allow_unicode=True)
+            # Сохранение новых данных с атомарной записью
+            data_to_save = convert_ordered_dict(new_data)
+            safe_yaml_dump(data_to_save, result_file, logger)
 
             total_stats['lists'] += 1
             total_stats['domains'] += list_stats['domains']
@@ -1180,3 +1248,4 @@ def main():
 if __name__ == "__main__":
     logger = logging.getLogger(__name__)
     main()
+    
