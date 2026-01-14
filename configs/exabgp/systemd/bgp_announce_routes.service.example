@@ -1,0 +1,27 @@
+[Unit]
+Description=MikroTik-ARMA: ExaBGP Dynamic Route Announcer
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=<change_user>
+Group=<change_user>
+WorkingDirectory=/path/to/MikroTik-ARMA
+
+# Активация виртуального окружения и запуск (изменить при необходимости)
+ExecStart=/path/to/MikroTik-ARMA/env/bin/exabgp /path/to/MikroTik-ARMA/configs/exabgp.conf
+
+# Перезапуск при падении
+Restart=on-failure
+RestartSec=10
+
+# Логирование
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=arma-exabgp-announcer
+
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
