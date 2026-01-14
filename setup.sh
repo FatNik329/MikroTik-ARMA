@@ -1,5 +1,5 @@
 #!/bin/bash
-# === Скрипт для деплоя MikroTik-ARMA ===
+# === Скрипт установки для MikroTik-ARMA ===
 
 set -e
 
@@ -33,7 +33,7 @@ fi
 
 # PART2 - создание основных директории проекта
 echo "📁 Создание структуры директорий проекта"
-mkdir -p security cache raw-data output-data configs/AddressLists logs/base logs/additional logs/helper
+mkdir -p security cache cache/bgp_announce_routes raw-data output-data configs/AddressLists logs/base logs/additional logs/helper
 echo "✅ Директории созданы"
 
 # и файлов c чувствительными данными (mikrotik.yaml, notify.yaml)
@@ -96,7 +96,7 @@ email:      # раздел настроек Email
 
 EOF
 
-# PART3 - генерирует run.sh - для общего запуска системы через виртуальное окружение
+# PART3 - генерирует run.sh - для общего запуска системы
 echo "⚙️ Создание run.sh"
 cat > run.sh <<EOF
 #!/bin/bash
