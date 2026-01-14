@@ -1,0 +1,61 @@
+# Пример минимальной конфигурации ExaBGP - configs/exabgp.conf
+# Process definitions (global)
+process dynamic-routes {
+    run /path/to/MikroTik-ARMA/scripts/daemon/bgp_announce_routes.py; # путь до скрипта bgp_announce_routes.py (абсолютный путь)
+    encoder text;
+}
+
+# Минимальное содержимое конфигурационного файла
+neighbor 192.168.0.1 {                  # IP peer-клиент1 для анонсирования
+    # Обязательные параметры
+    router-id 192.168.255.200;           # ID сервера (на котором работает скрипт)
+    local-address 192.168.255.200;       # IP адрес сервера
+    local-as 64512;                      # ASN сервера
+    peer-as 65530;                       # ASN peer-клиента
+
+    # Опциональные параметры
+    description "BGP-Peer-1";
+
+    # Address families
+    family {
+        ipv4 unicast;
+    }
+
+    # Capabilities
+    capability {
+        route-refresh;
+        graceful-restart;
+    }
+
+    # API конфигурация
+    api {
+        processes [ dynamic-routes ];
+    }
+}
+
+neighbor 192.168.1.1 {                   # IP peer-клиент2 для анонсирования
+    # Обязательные параметры
+    router-id 192.168.255.200;           # ID сервера (на котором работает скрипт)
+    local-address 192.168.255.200;       # IP адрес сервера
+    local-as 64512;                      # ASN сервера
+    peer-as 65531;                       # ASN peer-клиента2
+
+    # Опциональные параметры
+    description "BGP-Peer-2";
+
+    # Address families
+    family {
+        ipv4 unicast;
+    }
+
+    # Capabilities
+    capability {
+        route-refresh;
+        graceful-restart;
+    }
+
+    # API конфигурация
+    api {
+        processes [ dynamic-routes ];
+    }
+}
