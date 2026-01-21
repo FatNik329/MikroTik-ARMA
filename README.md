@@ -15,6 +15,7 @@
 [![IPinfo](https://img.shields.io/badge/IPinfo-page-00b7e1)](https://ipinfo.io)
 [![IANA](https://img.shields.io/badge/IANA-page-56b622)](https://www.iana.org)
 [![ExaBGP](https://img.shields.io/badge/ExaBGP-page-7e7b54)](https://github.com/Exa-Networks/exabgp)
+![AI](https://img.shields.io/badge/AI-page-5661fb)
 ![Russia](https://img.shields.io/badge/ru-Russia-white)
 
 <img src="images/arma-preview.jpg" alt="MikroTik-ARMA" style="width: 90%; max-width: 960px; max-height: 480px; aspect-ratio: 16/9; object-fit: contain;"/>
