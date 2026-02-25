@@ -5,6 +5,9 @@
 # 1. Импорты
 import os
 import yaml
+import json
+import ujson
+import re
 import logging
 import dns.resolver
 import mmap
@@ -99,20 +102,36 @@ def validate_log_format(log_file):
         return False
 
 def parse_timedelta(time_str):
-    """Конвертирует строку типа '1d'/'2w'"""
+    """Конвертирует строку типа '1d'/'2w'/'3h с проверкой лимита часов'"""
+    if time_str is None or str(time_str).lower() == "null":
+        return None
+
     units = {
+        'h': 'hours',
         'd': 'days',
         'w': 'weeks',
-        'm': 'days'
+        'm': 'days'  # месяц (30 дней)
     }
-    num = int(time_str[:-1])
+
     unit = time_str[-1].lower()
+    if unit not in units:
+        raise ValueError(f"Неизвестная единица времени: {unit}")
+
+    num = int(time_str[:-1])
+
+    # Ограничение timestamp_field: не более 23 часов
+    if unit == 'h' and num > 23:
+        logger.warning(f"timestamp_field={time_str} превышает 23 часа. Установлено 23h")
+        num = 23
 
     if unit == 'm':
         return timedelta(days=num*30)
+    elif unit == 'h':
+        return timedelta(hours=num)
+
     return timedelta(**{units[unit]: num})
 
-# Создание директории logs/dns_fwd
+# Создание директории логов logs/dns_fwd
 log_path = Path('logs/base/dns_fwd/dns_fwd.log')
 log_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -183,8 +202,69 @@ def save_failed_cache(cache, config):
     except Exception as e:
         logger.error(f"Ошибка сохранения кэша: {e}")
 
-# 4. Основные функции
+def cleanup_expired_ips(data, retention_days_ips, logger):
+    """
+    Очищает исторические IP-адреса старше retention_days_ips дней
+    Вызов плсде формирования results-dns
+    """
+    removed_count = 0
+    now = datetime.now()
 
+    for category, domains in data.get("categories", {}).items():
+        for domain, domain_data in domains.items():
+            # Очистка IPv4
+            if "ipv4" in domain_data and "historical" in domain_data["ipv4"]:
+                historical = domain_data["ipv4"]["historical"]
+                ips_to_remove = []
+
+                for ip, timestamp_str in historical.items():
+                    try:
+                        ip_date = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
+                        if (now - ip_date).days > retention_days_ips:
+                            ips_to_remove.append(ip)
+                    except Exception as e:
+                        logger.warning(f"Ошибка обработки timestamp IP {ip} для {domain}: {e}")
+                        ips_to_remove.append(ip)
+
+                for ip in ips_to_remove:
+                    historical.pop(ip, None)
+                    removed_count += 1
+
+                if "current" in domain_data["ipv4"]:
+                    domain_data["ipv4"]["current"] = [
+                        ip for ip in domain_data["ipv4"]["current"]
+                        if ip in historical
+                    ]
+
+            if "ipv6" in domain_data and "historical" in domain_data["ipv6"]:
+                historical = domain_data["ipv6"]["historical"]
+                ips_to_remove = []
+
+                for ip, timestamp_str in historical.items():
+                    try:
+                        ip_date = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
+                        if (now - ip_date).days > retention_days_ips:
+                            ips_to_remove.append(ip)
+                    except Exception as e:
+                        logger.warning(f"Ошибка обработки timestamp IP {ip} для {domain}: {e}")
+                        ips_to_remove.append(ip)
+
+                for ip in ips_to_remove:
+                    historical.pop(ip, None)
+                    removed_count += 1
+
+                if "current" in domain_data["ipv6"]:
+                    domain_data["ipv6"]["current"] = [
+                        ip for ip in domain_data["ipv6"]["current"]
+                        if ip in historical
+                    ]
+
+    if removed_count > 0:
+        logger.info(f"Удалено устаревших IP-адресов: {removed_count}")
+
+    return data, removed_count
+
+# 4. Основные функции
 def load_configs():
     """Загрузка всех конфигурации с конвертацией IDN и валидацией wildcards"""
     def convert_to_punycode(domain):
@@ -818,6 +898,207 @@ def load_existing_results(file_path):
         "categories": {}
     }
 
+def parse_jsonl_log(jsonl_config, domain_configs):
+    """Парсинг JSONL файлов"""
+
+    # Извлечение параметров конфигурации
+    path = jsonl_config["path_jsonl"]
+
+    # Получает timedelta объекты
+    rate_limit_td = parse_timedelta(jsonl_config.get("rate_limit_file", "0d"))
+    timestamp_td = parse_timedelta(jsonl_config.get("timestamp_field"))
+
+    # Преобразование значений
+    rate_limit_days = rate_limit_td.days if rate_limit_td else 0
+    time_filter_hours = timestamp_td.total_seconds() / 3600 if timestamp_td else None
+
+    cutoff_date = None
+    if rate_limit_days > 0:
+        cutoff_date = datetime.now() - timedelta(days=rate_limit_days)
+
+    # Определение текущей даты
+    today_date = datetime.now().date()
+
+    logger.info(f"Параметры JSONL парсера:")
+    logger.info(f"  - path_jsonl: {path}")
+    logger.info(f"  - rate_limit_date: {rate_limit_days} дней (cutoff: {cutoff_date.date() if cutoff_date else 'нет'})")
+
+    if time_filter_hours:
+        logger.info(f"  - timestamp_field: {time_filter_hours} часов (только файлы за сегодня)")
+    else:
+        logger.info(f"  - timestamp_field: отключен")
+
+    logger.debug(f"  - сегодняшняя дата: {today_date}")
+
+    def extract_date_from_filename(filename):
+        """Извлекает дату из имени файла формата *_YYYY-MM-DD.jsonl"""
+        match = re.search(r'(\d{4}-\d{2}-\d{2})', filename)
+        if match:
+            try:
+                return datetime.strptime(match.group(1), "%Y-%m-%d")
+            except ValueError:
+                return None
+        return None
+
+    def should_process_jsonl_file(file_path):
+        """
+        Определяет необходимость обработки JSONL файла
+        """
+        filename = os.path.basename(file_path)
+        file_date = extract_date_from_filename(filename)
+
+        # 1. Если дата не определяется из имени - проверяет по mtime
+        if not file_date:
+            if cutoff_date:
+                try:
+                    file_mtime = datetime.fromtimestamp(os.path.getmtime(file_path))
+                    return file_mtime >= cutoff_date
+                except Exception:
+                    return True
+            return True
+
+        # 2. Фильтрация по rate_limit_date
+        if cutoff_date and file_date < cutoff_date:
+            logger.debug(f"Файл {filename} пропущен (дата в имени {file_date.date()} < {cutoff_date.date()})")
+            return False
+
+        # 3. Если timestamp_field задан и файл не текущего дня
+        if time_filter_hours and file_date.date() != today_date:
+            logger.debug(f"Файл {filename} пропущен (файл не текущего дня и timestamp_field={time_filter_hours}h)")
+            return False
+
+        return True
+
+    results = {list_name: {} for list_name in domain_configs}
+    total_lines = 0
+    total_matches = 0
+    json_errors = 0
+
+    # Определение файлов для обработки
+    if os.path.isdir(path):
+        all_files = glob(os.path.join(path, "*.jsonl"))
+    else:
+        all_files = [path] if os.path.exists(path) else []
+
+
+    files_to_process = []
+    for file_path in all_files:
+        if should_process_jsonl_file(file_path):
+            files_to_process.append(file_path)
+        else:
+            logger.debug(f"Файл {os.path.basename(file_path)} пропущен по умной фильтрации")
+
+    logger.info(f"Будет обработано {len(files_to_process)} JSONL файлов (после умной фильтрации)")
+
+    # Фильтрация файлов по дате (rate_limit_file)
+    files_to_process = []
+    cutoff_date = datetime.now() - timedelta(days=rate_limit_days) if rate_limit_days > 0 else None
+
+    for file_path in all_files:
+        if cutoff_date:
+            filename = os.path.basename(file_path)
+            file_date = extract_date_from_filename(filename)
+
+            if file_date:
+                if file_date >= cutoff_date:
+                    files_to_process.append(file_path)
+                else:
+                    logger.debug(f"Файл {filename} пропущен (дата {file_date.date()} < {cutoff_date.date()})")
+            else:
+                try:
+                    file_mtime = datetime.fromtimestamp(os.path.getmtime(file_path))
+                    if file_mtime >= cutoff_date:
+                        files_to_process.append(file_path)
+                    else:
+                        logger.debug(f"Файл {filename} пропущен (модификация {file_mtime.date()} < {cutoff_date.date()})")
+                except Exception as e:
+                    logger.warning(f"Ошибка проверки времени файла {filename}: {e}")
+                    files_to_process.append(file_path)
+        else:
+            files_to_process.append(file_path)
+
+    for file_path in files_to_process:
+        logger.info(f"Обработка JSONL файла: {file_path}")
+        file_lines = 0
+        file_matches = 0
+
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                for line_num, line in enumerate(f, 1):
+                    total_lines += 1
+                    file_lines += 1
+
+                    # Пропуск пустых строк и комментариев
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+
+                    try:
+                        record = ujson.loads(line)
+
+                        # Извлечение домена
+                        domain = record.get("query_name", "").lower()
+
+                        if not domain:
+                            continue  # Пропустить записи без query_name
+
+                        # Фильтрация по времени записи (timestamp_field)
+                        if time_filter_hours:
+                            timestamp = record.get("timestamp")
+                            if timestamp:
+                                try:
+                                    # Разные форматы timestamp
+                                    if isinstance(timestamp, (int, float)) or timestamp.isdigit():
+                                        # Unix timestamp как число или строка с цифрами
+                                        record_time = datetime.fromtimestamp(float(timestamp))
+                                    else:
+                                        # Строковый формат ISO
+                                        record_time = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+
+                                    time_diff = (datetime.now() - record_time).total_seconds() / 3600
+                                    if time_diff > time_filter_hours:
+                                        continue
+                                except Exception as e:
+                                    # Если не может распарсить timestamp, пропускает фильтрацию по времени
+                                    logger.debug(f"Ошибка обработки timestamp '{timestamp}': {e}")
+
+                        # Матчинг доменов с шаблонами
+                        for list_name, categories in domain_configs.items():
+                            for category, targets in categories.items():
+                                for target in targets:
+                                    if is_domain_match(domain, target):
+                                        if category not in results[list_name]:
+                                            results[list_name][category] = {
+                                                'domains': {},
+                                                'wildcards': set() if any('*' in t for t in targets) else None
+                                            }
+
+                                        if domain not in results[list_name][category]['domains']:
+                                            results[list_name][category]['domains'][domain] = {
+                                                'target_template': f"{category} -> {target}"
+                                            }
+
+                                        file_matches += 1
+                                        total_matches += 1
+                                        break
+
+                    except json.JSONDecodeError as e:
+                        json_errors += 1
+                        logger.warning(f"Ошибка JSON в строке {line_num} файла {file_path}: {e}")
+                        continue
+                    except Exception as e:
+                        logger.warning(f"Ошибка обработки строки {line_num}: {e}")
+                        continue
+
+        except Exception as e:
+            logger.error(f"Ошибка чтения файла {file_path}: {e}")
+            continue
+
+        logger.info(f"Файл {file_path}: строк={file_lines}, совпадений={file_matches}")
+
+    logger.info(f"Итого: файлов={len(files_to_process)}, строк={total_lines}, совпадений={total_matches}, ошибок JSON={json_errors}")
+    return results
+
 def save_results(results, dns_servers, timeout, config, domain_records):
     """Сохраняет статистику и дубликаты"""
     def decode_idn(domain):
@@ -1059,49 +1340,25 @@ def save_results(results, dns_servers, timeout, config, domain_records):
                                     for ip in new_domain_data["ipv4"]["current"]:
                                         new_domain_data["ipv4"]["historical"][ip] = current_time
 
-                                    # Удаляет устаревшие IP (IPv4, IPv6)
-                                    ips_to_remove = []
-                                    for ip, timestamp in new_domain_data["ipv4"]["historical"].items():
-                                        try:
-                                            ip_date = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
-                                            if (now - ip_date).days > retention_days_ips:
-                                                ips_to_remove.append(ip)
-                                                list_stats['removed_ips'] += 1
-                                        except Exception:
-                                            ips_to_remove.append(ip)
-
-                                    for ip in ips_to_remove:
-                                        new_domain_data["ipv4"]["historical"].pop(ip, None)
-
+                                # Объединяет historical IPv6
                                 if old_domain_data.get("ipv6") and new_domain_data.get("ipv6"):
                                     if "historical" not in new_domain_data["ipv6"]:
                                         new_domain_data["ipv6"]["historical"] = {}
 
+                                    # Копирует старые historical IP
                                     if "historical" in old_domain_data["ipv6"]:
                                         for ip, timestamp in old_domain_data["ipv6"]["historical"].items():
                                             if ip not in new_domain_data["ipv6"]["historical"]:
                                                 new_domain_data["ipv6"]["historical"][ip] = timestamp
 
+                                    # Добавляет текущие IP
                                     for ip in new_domain_data["ipv6"]["current"]:
                                         new_domain_data["ipv6"]["historical"][ip] = current_time
-
-                                    ips_to_remove = []
-                                    for ip, timestamp in new_domain_data["ipv6"]["historical"].items():
-                                        try:
-                                            ip_date = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
-                                            if (now - ip_date).days > retention_days_ips:
-                                                ips_to_remove.append(ip)
-                                                list_stats['removed_ips'] += 1
-                                        except Exception:
-                                            ips_to_remove.append(ip)
-
-                                    for ip in ips_to_remove:
-                                        new_domain_data["ipv6"]["historical"].pop(ip, None)
 
                 else:
                     new_data["categories"][category] = merged_domains
 
-        # 4. Сохраняем данные
+        # 4. Сохраняет данные
         if new_data["categories"]:
             # Ротация бэкапов
             if backup_files > 0 and result_file.exists():
@@ -1115,21 +1372,29 @@ def save_results(results, dns_servers, timeout, config, domain_records):
                     backup_data = convert_ordered_dict(existing_data)
                     yaml.dump(backup_data, f, sort_keys=False, allow_unicode=True)
 
-            # Сохранение новых данных с атомарной записью
+            # Очистка устаревших IP-адресов
             data_to_save = convert_ordered_dict(new_data)
-            safe_yaml_dump(data_to_save, result_file, logger)
+            retention_days_ips = parse_timedelta(config["dns_fwd"]["storage_raw_data"]["retention_days_ips"]).days
+            cleaned_data, removed_ips_count = cleanup_expired_ips(data_to_save, retention_days_ips, logger)
 
+            # Обновляем статистику удалённых IP
+            total_stats['removed_ips'] += removed_ips_count
+
+            # Сохранение данных с атомарной записью
+            safe_yaml_dump(cleaned_data, result_file, logger)
+
+            # Обновление общей статистики
             total_stats['lists'] += 1
             total_stats['domains'] += list_stats['domains']
             total_stats['idn'] += list_stats['idn']
             total_stats['wildcards'] += list_stats['wildcards']
-            total_stats['removed_ips'] += list_stats['removed_ips']
 
             logger.info(
                 f"\nИтоги списка {list_name}: "
                 f"{list_stats['domains']} доменов | "
                 f"IDN: {list_stats['idn']} | "
-                f"Wildcards: {list_stats['wildcards']} "
+                f"Wildcards: {list_stats['wildcards']} | "
+                f"Удалено IP: {removed_ips_count}"
             )
         else:
             logger.warning(f"Список {list_name}: нет данных для сохранения")
@@ -1187,7 +1452,7 @@ def main():
         # Загрузка кэша
         failed_cache = load_failed_cache(config)
 
-        # Определяем источник данных
+        # Определяет источник данных
         data_source = config["dns_fwd"].get("data_source", "logs")
         logger.info(f"Источник данных: {data_source}")
 
@@ -1198,6 +1463,10 @@ def main():
                 logger.warning("Не удалось получить данные из metrics, завершение работы")
                 return
             results = process_queries_from_api(queries, domain_configs)
+        # Данные из JSON
+        elif data_source == "jsonl":
+            jsonl_config = config["dns_fwd"]["jsonl"]
+            results = parse_jsonl_log(jsonl_config, domain_configs)
         else:
             # Данные из лог журналов
             log_path = config["dns_fwd"]["logging"]["query_log_path"]
@@ -1223,7 +1492,7 @@ def main():
                     logger.error(f"В директории {log_path} не найдено .log файлов")
                     return
 
-            results = parse_query_log(log_path, domain_configs)
+            results = parse_query_log(log_path, domain_configs, source_type="dnscrypt")
 
         # Анализ дубликатов
         logger.info("\n=== Анализ дубликатов шаблонов ===")
@@ -1248,4 +1517,3 @@ def main():
 if __name__ == "__main__":
     logger = logging.getLogger(__name__)
     main()
-    
