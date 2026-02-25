@@ -26,6 +26,7 @@ main_start:
       get_asn_mmdb: false                      ### Запускать группу скриптов get_asn_mmdb.py (True/False)
       yaml_to_txt: false                       ### Запускать группу скриптов yaml_to_txt.py (True/False)
       json_to_txt: true                        ### Запускать группу скриптов json_to_txt (True/False)
+      gen_filter_forwarding: true
     maintenance:                             ## Обслуживающий функционал системы
       logs_rotate: false                      ### Запускать скрипт logs_rotate.py (True/False)
 
@@ -45,7 +46,8 @@ main_start:
       tld_parser: "1d"
       get_asn_mmdb: "14d"
       yaml_to_txt: "4h"
-      json_to_txt: "4h"   
+      json_to_txt: "4h"
+      gen_filter_forwarding: "12h"
     maintenance:                             ## Актуальность запусков обслуживающего функционала
       logs_rotate: "false"                   ### Отключен - запуск без ограничений
 
@@ -87,6 +89,7 @@ main_start:
         - "filter_results_dns-*.py"
         - "tld_parser.py"
         - "get_asn_mmdb.py"
+        - "gen_filter_forwarding.py"
       base_name_patterns:
         backup_Mikrotik: "^backup_Mikrotik"
         lm_sensors: "^lm_sensors"
@@ -97,6 +100,7 @@ main_start:
         get_asn_mmdb: "^get_asn_mmdb"
         yaml_to_txt: "^yaml_to_txt"
         json_to_txt: "^json_to_txt"
+        gen_filter_forwarding: "^gen_filter_forwarding"
 
 # Настройки скрипта dns_fwd.py
 # ============================
@@ -104,10 +108,15 @@ dns_fwd:
   data_source: "logs"  # Источник получения данных: logs -> файлы-журналы | metrics -> API
   metrics:             # Раздел настроек режима 'metrics'
     url: "http://localhost:8080/api/metrics" # Адрес API
-    auth_user: "myuser"  # опционально, null - без auth user
-    auth_pass: "mypassword-user"  # опционально, null - без auth pass
-    recent_count: 100  # Количество последних записей (по умолч. отдаёт dnscrypt-proxy -> 100)
-    timeout: 10 # время без ответа API
+    auth_user: "myuser"                 # опционально, null - без auth user
+    auth_pass: "mypassword-user"        # опционально, null - без auth pass
+    recent_count: 100                   # Количество последних записей (по умолч. отдаёт dnscrypt-proxy -> 100)
+    timeout: 10                         # время без ответа API
+  jsonl:
+    path_jsonl: "/path/to/example_dns_logs"   # Директория универсальных лог файлов JSONL
+    rate_limit_file: "1d"                     # Обрабатывать файлы за последние N дней
+    timestamp_field: "1h"                     # или null для отключения фильтрации по времени в записях (за последние N часов)
+
 
   logging:
     query_log_path: "/path/to/dnscrypt/logs/query.log"  # Основной путь до лог файла DNSCrypt
@@ -131,7 +140,7 @@ dns_fwd:
     retention_days_domain: "14d"  # Количество дней хранить неактивные домены
     retention_days_ips: "7d"      # Количество дней хранить неактиные (historical) IP доменов
     backup_files: 2               # Количество backup-копий
-    skip_duplicates: false         # Пропускать дубликаты шаблонов при формировании results-dns.yaml (true - не пропускать/false - пропускать) 
+    skip_duplicates: false        # Пропускать дубликаты шаблонов при формировании results-dns.yaml (true - не пропускать/false - пропускать) 
 
 # Настройки скрипта fetch_as_prefixes.py
 # ======================================
