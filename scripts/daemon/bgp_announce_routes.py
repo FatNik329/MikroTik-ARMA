@@ -183,12 +183,12 @@ class ScriptState:
 
         # Статистика
         self.statistics = {
-            'total_routes_announced': 0,
-            'total_routes_withdrawn': 0,
             'last_update_time': None,
             'update_cycles': 0,
             'exabgp_alive': False,
-            'last_exabgp_check': None
+            'last_exabgp_check': None,
+            'invalid_prefixes': 0,
+            'total_lines_processed': 0
         }
 
     def update_group_info(self, group_name, routes_count, last_updated):
@@ -201,7 +201,7 @@ class ScriptState:
 
     def get_health_data(self):
         """Возвращает данные для health check"""
-        return {
+        health_data = {
             'statistics': self.statistics.copy(),
             'groups': self.groups_info.copy(),
             'config_info': {
@@ -210,6 +210,30 @@ class ScriptState:
                 'monitoring_port': self.config['monitoring']['listen_port']
             }
         }
+
+        if 'prefix_overlaps' in self.statistics:
+            overlaps = self.statistics['prefix_overlaps']
+            health_data['prefix_overlaps'] = {
+                'count': overlaps['count'],
+                'groups_affected': len(overlaps.get('groups_involved', [])),
+                'last_detected': overlaps.get('last_detected')
+            }
+            # Добавлет предупреждение в data_quality
+            if 'data_quality' not in health_data:
+                health_data['data_quality'] = {}
+            health_data['data_quality']['overlapping_prefixes'] = overlaps['count']
+
+        # Добавляет информацию о качестве данных
+        if self.statistics.get('total_lines_processed', 0) > 0:
+            invalid_rate = (self.statistics.get('invalid_prefixes', 0) /
+                           self.statistics['total_lines_processed'] * 100)
+            health_data['data_quality'] = {
+                'total_lines': self.statistics['total_lines_processed'],
+                'invalid_prefixes': self.statistics.get('invalid_prefixes', 0),
+                'invalid_rate': f"{invalid_rate:.2f}%"
+            }
+
+        return health_data
 
 class HealthCheckHandler(BaseHealthCheckHandler):
     """Обработчик HTTP запросов для health check"""
@@ -294,13 +318,27 @@ def main():
     console_logger.info("ExaBGP готов к запуску")
 
     try:
-        cache_data = initial_announcement()
-        # Обновляет статус после успешного старта
+        # Первоначальный анонс
+        initial_announcement()
+
+        # Загружает текущие маршруты для последующих сравнений
+        current_routes = initial_announcement()
+
+        # Проверяет пересечения
+        console_logger.info("\n" + "=" * 64)
+        console_logger.info("Проверка пересечений адресов")
+        console_logger.info("=" * 64)
+
+        routes_sets = {group: set(routes) for group, routes in current_routes.items()}
+        check_prefix_overlaps(routes_sets)
+
         with monitoring_core.health_lock:
             monitoring_core.health_status['status'] = 'healthy'
+
         if script_state:
             script_state.statistics['exabgp_alive'] = True
             script_state.statistics['last_exabgp_check'] = datetime.now().isoformat()
+
     except Exception as e:
         logger.error(f"Ошибка при первоначальном анонсе: {e}")
         console_logger.error(f"Ошибка при запуске: {e}")
@@ -353,7 +391,7 @@ def main():
                     graceful_shutdown()
                     sys.exit(1)
 
-                last_check_time, cache_data = periodic_update(last_check_time, cache_data)
+                last_check_time, current_routes = periodic_update(last_check_time, current_routes)
 
                 # Обновляет статистику после успешного цикла обновления
                 update_health_statistics('update_cycle', success=True)
@@ -420,8 +458,8 @@ def main():
     finally:
         with monitoring_core.health_lock:
             if monitoring_core.health_status.get('status') not in ['stopped', 'shutting_down']:
-                console_logger.warning("Неожиданное завершение, выполняем emergency graceful shutdown")
-                logger.warning("Неожиданное завершение, запускает emergency graceful shutdown")
+                console_logger.warning("Неожиданное завершение, выполняется emergency graceful shutdown")
+                logger.warning("Неожиданное завершение, запуск emergency graceful shutdown")
                 graceful_shutdown()
 
         # Финальное сообщение о завершении
@@ -622,7 +660,6 @@ def announce_routes_individual(group_name: str, routes: list):
             sys.stdout.write(cmd + "\n")
             sys.stdout.flush()
 
-            # Проверка, на необходимость замедления
             try:
                 ready, _, _ = select.select([sys.stdin], [], [], 0.001)
                 if ready:
@@ -632,9 +669,8 @@ def announce_routes_individual(group_name: str, routes: list):
                         # Если ExaBGP перегружен - замедляется
                         if 'overload' in message.lower() or 'busy' in message.lower():
                             console_logger.warning("ExaBGP сообщает о перегрузке, увеличение задержки")
-                            delay_between_routes = min(delay_between_routes * 2, 0.1)  # Увеличивает до 100мс максимум
+                            delay_between_routes = min(delay_between_routes * 2, 0.1)
             except Exception as e:
-                # Игнорирует ошибки при неблокирующем чтении
                 pass
 
             # Подтверждение отправки команды
@@ -932,8 +968,16 @@ def flush_all_routes(group_name: str):
     console_logger.info(f"Отозваны все маршруты группы {group_name}")
     logger.info(f"Отозваны все маршруты группы '{group_name}'")
 
+def get_all_current_routes() -> dict:
+    """Читает текущие маршруты из всех групп для использования в памяти"""
+    current_routes = {}
+    for group_name, directory in DEFAULT_CONFIG['path_list_announce'].items():
+        current_routes[group_name] = read_routes_from_directory(directory, group_name)
+        logger.debug(f"Группа '{group_name}': загружено {len(current_routes[group_name])} маршрутов")
+    return current_routes
+
 def initial_announcement():
-    """Выполняет первоначальный анонс всех маршрутов"""
+    """Выполняет первоначальный анонс всех маршрутов и сохраняет состояния файлов"""
     console_logger.info("-" * 64)
     console_logger.info("Первоначальный анонс маршрутов")
     console_logger.info("-" * 64)
@@ -942,46 +986,45 @@ def initial_announcement():
         script_state.statistics['exabgp_alive'] = False
         script_state.statistics['last_exabgp_check'] = None
 
-    console_logger.info("ExaBGP доступен, начинает анонс...")
+    console_logger.info("ExaBGP доступен, начинаю анонс...")
 
-    cache_data = {}
+    directories_state = {}
     total_routes = 0
 
     for group_name, directory in DEFAULT_CONFIG['path_list_announce'].items():
         console_logger.info(f"Обработка группы: {group_name}")
 
-        # Читает маршруты
+        # Чтение маршрутов
         routes = read_routes_from_directory(directory, group_name)
 
         if routes:
-            # Анонсирует маршруты
+            # Анонс маршрутов
             announce_routes_individual(group_name, routes)
             total_routes += len(routes)
 
-            # Фиксирует в кэш файл
-            if 'groups' not in cache_data:
-                cache_data['groups'] = {}
+            # Сохранение состояний директорий
+            directories_state[group_name] = calculate_directory_state(directory)
+        else:
+            directories_state[group_name] = calculate_directory_state(directory)
 
-            cache_data['groups'][group_name] = {
-                'state': calculate_directory_state(directory),
-                'routes': routes,
-                'last_updated': datetime.now().isoformat(),
-                'total_routes': len(routes)
-            }
-
-    # Сохраняет кэш файл
-    save_cache(cache_data)
+    save_cache(directories_state)
 
     console_logger.info(f"Первоначальный анонс завершён. Всего анонсировано {total_routes} маршрутов")
     logger.info(f"Первоначальный анонс завершён: анонсировано {total_routes} маршрутов")
 
-    return cache_data
+    if script_state:
+        script_state.statistics['last_update_time'] = datetime.now().isoformat()
+        script_state.statistics['update_cycles'] = 1
+
+    # Возвращает текущие маршруты для следующего цикла
+    return get_all_current_routes()
 
 # ===========================
 # Кэширование и чтение файлов
 # ===========================
-def normalize_prefix(prefix: str) -> str:
-    """Нормализует префикс/IP"""
+def normalize_prefix(prefix: str, source_info: str = None) -> str:
+    """Нормализует префикс/IP с подсчётом ошибок"""
+    original = prefix
     prefix = prefix.strip()
 
     # Удаляет комментарии
@@ -992,14 +1035,25 @@ def normalize_prefix(prefix: str) -> str:
     if not prefix:
         return None
 
-    # Наличие CIDR
+    # Добавляет /32 для хостов
     if '/' not in prefix:
         prefix = f"{prefix}/32"
 
     try:
         network = ip_network(prefix, strict=False)
         return str(network)
-    except ValueError:
+    except ValueError as e:
+        # Логирует ошибку с контекстом
+        error_msg = f"Некорректный IP-адрес/префикс: '{original}'"
+        if source_info:
+            error_msg += f" ({source_info})"
+
+        logger.warning(error_msg)
+
+        # Увеличивает счётчик ошибок
+        if script_state:
+            script_state.statistics['invalid_prefixes'] = script_state.statistics.get('invalid_prefixes', 0) + 1
+
         return None
 
 def calculate_file_hash(file_path: Path) -> str:
@@ -1044,7 +1098,13 @@ def calculate_directory_state(directory_path: str) -> dict:
 
 def read_routes_from_directory(directory_path: str, group_name: str) -> list:
     """Читает все маршруты из TXT файлов в директории"""
-    all_routes = set()
+    remove_duplicates = DEFAULT_CONFIG.get('remove_duplicates', True)
+
+    if remove_duplicates:
+        all_routes = set()
+    else:
+        all_routes = []
+
     dir_path = Path(directory_path)
 
     if not dir_path.exists() or not dir_path.is_dir():
@@ -1054,7 +1114,6 @@ def read_routes_from_directory(directory_path: str, group_name: str) -> list:
     # Поиск файлов с учетом рекурсивности
     if DEFAULT_CONFIG['recursive_search']:
         txt_files = sorted(dir_path.rglob("*.txt"))
-        console_logger.info(f"Рекурсивный поиск TXT файлов в {directory_path}")
     else:
         txt_files = sorted(dir_path.glob("*.txt"))
 
@@ -1062,36 +1121,85 @@ def read_routes_from_directory(directory_path: str, group_name: str) -> list:
         console_logger.warning(f"TXT файлы не найдены в {directory_path}")
         return []
 
-    console_logger.info(f"Найдено {len(txt_files)} TXT файлов в {directory_path}")
-
-    # Счетчики для статистики
+    # Счётчики для статистики
     total_lines = 0
+    valid_routes = 0
     duplicate_count = 0
+    invalid_count = 0
 
     for txt_file in txt_files:
+        file_route_count = 0
         try:
             with open(txt_file, 'r', encoding='utf-8') as f:
-                for line in f:
-                    normalized = normalize_prefix(line.strip())
+                for line_num, line in enumerate(f, 1):
+                    total_lines += 1
+                    source = f"{txt_file.name}:{line_num}"
+                    normalized = normalize_prefix(line.strip(), source)
+
                     if normalized:
-                        total_lines += 1
+                        valid_routes += 1
+                        file_route_count += 1
 
-                        route_count_before = len(all_routes)
-                        all_routes.add(normalized)
-                        route_count_after = len(all_routes)
+                        if remove_duplicates:
+                            if normalized in all_routes:
+                                duplicate_count += 1
+                                logger.debug(f"Дубликат: {normalized} в {source}")
+                            else:
+                                all_routes.add(normalized)
+                        else:
+                            all_routes.append(normalized)
+                    else:
+                        invalid_count += 1
 
-                        if route_count_after == route_count_before:
-                            duplicate_count += 1
-                            logger.debug(f"Дубликат найден: {normalized} в файле {txt_file.name}")
+            logger.debug(f"Файл {txt_file.name}: прочитано {file_route_count} маршрутов")
 
         except Exception as e:
             console_logger.error(f"Ошибка чтения файла {txt_file}: {e}")
             logger.error(f"Ошибка чтения файла {txt_file}: {e}")
 
-    routes = sorted(list(all_routes))
-    unique_count = len(routes)
+    # Преобразует в список
+    if remove_duplicates:
+        routes = sorted(list(all_routes))
+        console_logger.info(f"  - Удалено дубликатов: {duplicate_count}")
+    else:
+        routes = all_routes
 
-    # Логирует статистику по дубликатам
+    # Обновлет статистику
+    if script_state:
+        script_state.statistics['total_lines_processed'] = \
+            script_state.statistics.get('total_lines_processed', 0) + total_lines
+
+        if remove_duplicates and duplicate_count > 0:
+            # Общая статистика по всем группам
+            if 'duplicates_removed' not in script_state.statistics:
+                script_state.statistics['duplicates_removed'] = 0
+            script_state.statistics['duplicates_removed'] += duplicate_count
+
+            # Статистика по конкретной группе
+            if 'groups_stats' not in script_state.statistics:
+                script_state.statistics['groups_stats'] = {}
+            if group_name not in script_state.statistics['groups_stats']:
+                script_state.statistics['groups_stats'][group_name] = {}
+
+            script_state.statistics['groups_stats'][group_name]['duplicates'] = \
+                script_state.statistics['groups_stats'][group_name].get('duplicates', 0) + duplicate_count
+        # =====================================================================
+
+    # Лог статистики по группе
+    console_logger.info(f"Группа '{group_name}':")
+    console_logger.info(f"  - Файлов обработано: {len(txt_files)}")
+    console_logger.info(f"  - Всего строк: {total_lines}")
+    console_logger.info(f"  - Валидных маршрутов: {valid_routes}")
+    console_logger.info(f"  - Некорректных записей: {invalid_count}")
+    if remove_duplicates:
+        console_logger.info(f"  - Удалено дубликатов: {duplicate_count}")
+    console_logger.info(f"  - Итоговое количество: {len(routes)}")
+
+    # Если есть некорректные записи - пишет в лог
+    if invalid_count > 0:
+        logger.warning(f"Группа '{group_name}': пропущено {invalid_count} некорректных записей")
+
+    # Обновлет информацию о группе
     if script_state:
         script_state.update_group_info(
             group_name=group_name,
@@ -1101,43 +1209,56 @@ def read_routes_from_directory(directory_path: str, group_name: str) -> list:
 
     return routes
 
-def load_cache() -> dict:
-    """Загружает кэш из файла"""
-    if not cache_path.exists():
-        console_logger.info("Кэш-файл не найден, будет создан новый")
-        logger.info("Кэш-файл не найден, создаётся новый")
-        return {}
-
-    try:
-        with open(cache_path, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception as e:
-        logger.error(f"Ошибка загрузки кэша: {e}")
-        console_logger.error(f"Ошибка загрузки кэша: {e}")
-        return {}
-
-def save_cache(cache_data: dict):
-    """Сохраняет кэш в файл"""
-    try:
-        # Добавляет метаданные
-        cache_data['_metadata'] = {
+def save_cache(directories_state: dict):
+    """Сохраняет состояния директорий"""
+    cache_data = {
+        '_metadata': {
             'last_update': datetime.now().isoformat(),
             'script': script_name,
             'config_used': {
-                'recursive_search': DEFAULT_CONFIG['recursive_search'],
-                'remove_duplicates': DEFAULT_CONFIG['remove_duplicates']
+                'recursive_search': DEFAULT_CONFIG['recursive_search']
             }
-        }
+        },
+        'directories': directories_state
+    }
 
+    try:
         with open(cache_path, 'w', encoding='utf-8') as f:
             json.dump(cache_data, f, indent=2, ensure_ascii=False)
-
         os.chmod(cache_path, 0o755)
-
-        logger.debug(f"Кэш сохранён: {cache_path}")
+        logger.debug(f"Кэш состояний сохранён: {cache_path}")
     except Exception as e:
         logger.error(f"Ошибка сохранения кэша: {e}")
         console_logger.error(f"Ошибка сохранения кэша: {e}")
+
+
+def load_cache() -> dict:
+    """Загружает состояния директорий"""
+    if not cache_path.exists():
+        logger.info("Кэш-файл не найден, будет создан новый")
+        return {'directories': {}}
+
+    try:
+        with open(cache_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+            if 'groups' in data and 'directories' not in data:
+                logger.info("Конвертация старого формата кэша в новый")
+                directories_state = {}
+                for group_name, group_data in data['groups'].items():
+                    if 'state' in group_data:
+                        directories_state[group_name] = group_data['state']
+                return {'directories': directories_state}
+
+            if 'directories' not in data:
+                data['directories'] = {}
+
+            return data
+
+    except Exception as e:
+        logger.error(f"Ошибка загрузки кэша: {e}")
+        console_logger.error(f"Ошибка загрузки кэша: {e}")
+        return {'directories': {}}
 
 def compare_states(old_state: dict, new_state: dict) -> tuple:
     """Сравнивает два состояния и возвращает изменения"""
@@ -1161,32 +1282,88 @@ def compare_states(old_state: dict, new_state: dict) -> tuple:
 
     return changes
 
+def check_prefix_overlaps(routes_by_group=None):
+    """
+    Проверяет пересечения маршрутов между группами.
+    """
+    if routes_by_group is not None:
+        groups_routes = routes_by_group
+    else:
+        groups_routes = {}
+        for group_name, directory in DEFAULT_CONFIG['path_list_announce'].items():
+            groups_routes[group_name] = set(read_routes_from_directory(directory, group_name))
+
+    if len(groups_routes) <= 1:
+        return set()
+
+    # Поиск пересечений между маршрутными листами
+    all_prefixes = {}
+    duplicates = set()
+
+    for group_name, routes in groups_routes.items():
+        for prefix in routes:
+            if prefix in all_prefixes:
+                duplicates.add(prefix)
+                all_prefixes[prefix].append(group_name)
+            else:
+                all_prefixes[prefix] = [group_name]
+
+    real_duplicates = {p for p in duplicates if len(set(all_prefixes[p])) > 1}
+
+    if real_duplicates:
+        console_logger.warning("=" * 80)
+        console_logger.warning("Обнаружены пересекающиеся префиксы между группами")
+        console_logger.warning("=" * 80)
+
+        # Показывает пересечения
+        shown = 0
+        groups_with_overlaps = set()
+        for prefix in list(real_duplicates)[:10]:
+            groups_with_prefix = list(set(all_prefixes[prefix]))
+            groups_with_overlaps.update(groups_with_prefix)
+            console_logger.warning(f"  {prefix} → группы: {', '.join(groups_with_prefix)}")
+            shown += 1
+
+        if len(real_duplicates) > 10:
+            console_logger.warning(f" {len(real_duplicates) - 10} пересечений")
+
+        console_logger.warning("=" * 80)
+        logger.warning(f"Обнаружено {len(real_duplicates)} пересекающихся префиксов между группами")
+
+        if script_state:
+            script_state.statistics['prefix_overlaps'] = {
+                'count': len(real_duplicates),
+                'groups_affected': len(set().union(*[set(all_prefixes[p]) for p in real_duplicates])),
+                'groups_list': sorted(list(set().union(*[set(all_prefixes[p]) for p in real_duplicates]))),
+                'last_detected': datetime.now().isoformat(),
+                'examples': list(real_duplicates)[:5]  # Первые 5 пересечений (пример)
+            }
+
+    else:
+        console_logger.info("Пересекающихся префиксов между разными группами не найдено")
+
+        if script_state and 'prefix_overlaps' in script_state.statistics:
+            script_state.statistics['prefix_overlaps']['count'] = 0
+            script_state.statistics['prefix_overlaps']['last_detected'] = datetime.now().isoformat()
+            script_state.statistics['prefix_overlaps']['resolved'] = True
+
+    return real_duplicates
+
 # =======================
 # Обновление и мониторинг
 # =======================
-def update_routes_for_group(group_name: str, directory: str, cache_data: dict) -> tuple:
+def update_routes_for_group(group_name: str, directory: str,
+                           current_routes: list, previous_routes: list) -> tuple:
     """
-    Обновляет маршруты для группы на основе изменений в файлах.
-    Возвращает кортеж: (новые_маршруты, удалённые_маршруты, обновлён_ли)
+    Сравнивает текущие и предыдущие маршруты, возвращает изменения.
     """
-    current_state = calculate_directory_state(directory)
+    current_set = set(current_routes)
+    previous_set = set(previous_routes)
 
-    previous_state = cache_data.get('groups', {}).get(group_name, {}).get('state', {})
+    routes_to_withdraw = sorted(list(previous_set - current_set))
+    routes_to_announce = sorted(list(current_set - previous_set))
 
-    changes = compare_states(previous_state, current_state)
-
-    current_routes = read_routes_from_directory(directory, group_name)
-
-    previous_routes = set(cache_data.get('groups', {}).get(group_name, {}).get('routes', []))
-
-    # Поиск изменений в маршрутах
-    current_routes_set = set(current_routes)
-    routes_to_withdraw = sorted(list(previous_routes - current_routes_set))
-    routes_to_announce = sorted(list(current_routes_set - previous_routes))
-
-    file_changes = any(len(changes[change_type]) > 0 for change_type in ['added', 'modified', 'removed'])
-    route_changes = len(routes_to_announce) > 0 or len(routes_to_withdraw) > 0
-    has_changes = file_changes or route_changes
+    has_changes = bool(routes_to_announce or routes_to_withdraw)
 
     # Обновляет информацию о группе в состоянии скрипта
     if script_state:
@@ -1198,15 +1375,17 @@ def update_routes_for_group(group_name: str, directory: str, cache_data: dict) -
 
     return (routes_to_announce, routes_to_withdraw, has_changes)
 
-def periodic_update(last_check_time: float, cache_data: dict) -> tuple:
+def periodic_update(last_check_time: float, previous_routes: dict) -> tuple:
     """
     Выполняет периодическую проверку обновлений.
+    Читает файлы при обнаружении изменений.
     """
     global running
 
     if not running:
-        return (last_check_time, cache_data)
+        return (last_check_time, previous_routes)
 
+    # Проверка ExaBGP
     try:
         sys.stdout.write("\n")
         sys.stdout.flush()
@@ -1216,74 +1395,141 @@ def periodic_update(last_check_time: float, cache_data: dict) -> tuple:
             script_state.statistics['exabgp_alive'] = False
         raise
 
-    # Проверка на запрос завершение работы
-    if not running:
-        return (last_check_time, cache_data)
-
     current_time = time.time()
 
     # Проверка интервала обновления
     if current_time - last_check_time < DEFAULT_CONFIG['update_interval']:
-        return (last_check_time, cache_data)
+        return (last_check_time, previous_routes)
 
     console_logger.info("-" * 81)
     console_logger.info("Цикл проверки обновлений маршрутных листов")
     console_logger.info("-" * 81)
 
-    console_logger.info("Ожидание готовности ExaBGP перед обновлением...")
-    wait_for_exabgp_ready(timeout=5)
-    time.sleep(1)
+    # Загружает состояния файлов из кэша
+    cache_data = load_cache()
+    cached_states = cache_data.get('directories', {})
 
-    last_check_time = current_time
+    # Инициализирует структуры данных
+    current_routes = {}     # Содержит изменённые группы
+    directories_state = {}  # Состояния для всех групп
+    has_any_changes = False
+
     total_withdrawn = 0
     total_announced = 0
-    has_global_changes = False
 
-    updated_cache = cache_data.copy()
+    # ------------------------------
+    # ЭТАП 1: Проверка - хеши файлов
+    # ------------------------------
+    console_logger.info("Этап 1: Проверка изменений в файлах...")
 
     for group_name, directory in DEFAULT_CONFIG['path_list_announce'].items():
         if not running:
             break
 
-        console_logger.info(f"Проверка обновлений для группы: {group_name}")
+        # Вычисляет текущее состояние директории (хеши файлов)
+        current_state = calculate_directory_state(directory)
+        directories_state[group_name] = current_state
 
-        # Обновляет маршруты для группы
-        routes_to_announce, routes_to_withdraw, has_changes = update_routes_for_group(
-            group_name, directory, updated_cache
-        )
+        previous_state = cached_states.get(group_name, {})
 
-        if has_changes:
-            has_global_changes = True
+        changes = compare_states(previous_state, current_state)
+        files_changed = any(len(changes[t]) > 0 for t in ['added', 'modified', 'removed'])
 
-            if routes_to_withdraw:
-                withdraw_routes_individual(group_name, routes_to_withdraw)
-                total_withdrawn += len(routes_to_withdraw)
+        if files_changed:
+            console_logger.info(f"  Группа '{group_name}': обнаружены изменения")
+            if changes['added']:
+                console_logger.info(f"    - Добавлено файлов: {len(changes['added'])}")
+            if changes['modified']:
+                console_logger.info(f"    - Изменено файлов: {len(changes['modified'])}")
+            if changes['removed']:
+                console_logger.info(f"    - Удалено файлов: {len(changes['removed'])}")
 
-            if routes_to_announce:
-                announce_routes_individual(group_name, routes_to_announce)
-                total_announced += len(routes_to_announce)
+            # -------------------------------------------------
+            # ЭТАП 2: Изменение есть - читает содержимое файлов
+            # -------------------------------------------------
+            console_logger.info(f"  Группа '{group_name}': чтение маршрутов...")
+            current_routes[group_name] = read_routes_from_directory(directory, group_name)
+            has_any_changes = True
+        else:
+            console_logger.info(f"  Группа '{group_name}': изменений нет, используется кэш памяти")
+            if group_name in previous_routes:
+                current_routes[group_name] = previous_routes[group_name]
+            else:
+                current_routes[group_name] = read_routes_from_directory(directory, group_name)
 
-    # Сохраняет обновлённый кэш
-    if has_global_changes and running:
-        save_cache(updated_cache)
-        logger.info(f"Обновления применены: отозвано {total_withdrawn}, анонсировано {total_announced} маршрутов")
+    # ----------------------------------------------------------------
+    # ЭТАП 3: Применение изменений для групп с обновлёнными маршрутами
+    # ----------------------------------------------------------------
+    if has_any_changes and running:
+        console_logger.info("-" * 81)
+        console_logger.info("Этап 2: Применение изменений BGP")
+        console_logger.info("-" * 81)
+
+        for group_name in current_routes.keys():
+            if not running:
+                break
+
+            previous_group_routes = previous_routes.get(group_name, [])
+
+            # Сравнивает маршруты
+            to_announce, to_withdraw, routes_changed = update_routes_for_group(
+                group_name,
+                DEFAULT_CONFIG['path_list_announce'][group_name],
+                current_routes[group_name],
+                previous_group_routes
+            )
+
+            if to_withdraw:
+                console_logger.info(f"Группа '{group_name}': отзыв {len(to_withdraw)} маршрутов")
+                withdraw_routes_individual(group_name, to_withdraw)
+                total_withdrawn += len(to_withdraw)
+
+            if to_announce:
+                console_logger.info(f"Группа '{group_name}': анонс {len(to_announce)} маршрутов")
+                announce_routes_individual(group_name, to_announce)
+                total_announced += len(to_announce)
+
+            if not to_withdraw and not to_announce:
+                console_logger.info(f"Группа '{group_name}': файлы изменены, но состав маршрутов не изменился")
+
+    # ---------------------------------
+    # ЭТАП 4: Сохранет состояния в кэш
+    # ---------------------------------
+    if has_any_changes and running:
+        save_cache(directories_state)
+
+        if script_state:
+            script_state.statistics['last_update_time'] = datetime.now().isoformat()
+            script_state.statistics['update_cycles'] = script_state.statistics.get('update_cycles', 0) + 1
+
+        # Итоги
+        if total_withdrawn > 0 or total_announced > 0:
+            logger.info(f"Обновления применены: отозвано {total_withdrawn}, анонсировано {total_announced} маршрутов")
+            console_logger.info(f"Итог цикла: отозвано {total_withdrawn}, анонсировано {total_announced} маршрутов")
+        else:
+            console_logger.info("Файлы изменены, но состав маршрутов не изменился")
+            logger.info("Файлы изменены, но состав маршрутов идентичен")
     elif running:
-        console_logger.info("Изменений не обнаружено")
+        console_logger.info("-" * 81)
+        console_logger.info("Изменений в файлах не обнаружено")
+        console_logger.info("-" * 81)
         logger.info("Периодическая проверка: изменений не обнаружено")
 
-    return (last_check_time, updated_cache)
+        if script_state and 'last_check_time' in script_state.statistics:
+            script_state.statistics['last_check_time'] = datetime.now().isoformat()
+
+    for group_name in DEFAULT_CONFIG['path_list_announce'].keys():
+        if group_name not in current_routes and group_name in previous_routes:
+            current_routes[group_name] = previous_routes[group_name]
+
+    last_check_time = current_time
+    return (last_check_time, current_routes)
 
 def update_health_statistics(operation_type, count=1, success=True, error=None):
     """Обновляет статистику здоровья"""
     global monitoring_core, script_state
 
     monitoring_core.update_statistics(operation_type, count, success, error)
-
-    if script_state:
-        if operation_type == 'announce':
-            script_state.statistics['total_routes_announced'] += count
-        elif operation_type == 'withdraw':
-            script_state.statistics['total_routes_withdrawn'] += count
 
 def get_group_attribute(group_name: str, attribute_name: str):
     """Получает атрибут для группы или использует значение по умолчанию"""
@@ -1300,42 +1546,36 @@ def graceful_shutdown():
     """Выполняет корректное завершение с отзывом всех маршрутов"""
     global running, script_state, monitoring_core
 
-    if running:
-        console_logger.info("=" * 64)
-        console_logger.info("Graceful shutdown - отзыв всех маршрутов")
-        console_logger.info("=" * 64)
-    else:
+    if not running:
         return
 
-    logger.info("Graceful shutdown")
+    console_logger.info("=" * 64)
+    console_logger.info("Graceful shutdown - отзыв всех маршрутов")
+    console_logger.info("=" * 64)
 
-    # Обновляет статус в monitoring_core
+    logger.info("Graceful shutdown начат")
+
+    # Обновлет статус
     with monitoring_core.health_lock:
-        monitoring_core.health_status['status'] = 'stopped'
+        monitoring_core.health_status['status'] = 'shutting_down'
 
-    # Обновляет состояние скрипта
     if script_state:
         script_state.running = False
 
-    logger.info("Graceful shutdown")
+    # Читает маршруты из файлов
+    for group_name, directory in DEFAULT_CONFIG['path_list_announce'].items():
+        console_logger.info(f"Чтение маршрутов группы '{group_name}' для отзыва")
+        routes = read_routes_from_directory(directory, group_name)
 
-    cache_data = load_cache()
+        if routes:
+            console_logger.info(f"Отзыв {len(routes)} маршрутов группы '{group_name}'")
+            logger.info(f"Отзыв маршрутов группы '{group_name}': {len(routes)} маршрутов")
 
-    # Отзывает маршруты для всех групп
-    if 'groups' in cache_data:
-        for group_name in cache_data['groups'].keys():
-            if group_name in DEFAULT_CONFIG['path_list_announce']:
-                routes = cache_data['groups'][group_name].get('routes', [])
-                if routes:
-                    console_logger.info(f"Отзыв маршрутов группы '{group_name}' ({len(routes)} маршрутов)")
-                    logger.info(f"Отзыв маршрутов группы '{group_name}': {len(routes)} маршрутов")
-
-                    try:
-                        # Использует bulk для быстрого отзыва
-                        withdraw_routes_bulk(group_name, routes, force=True)
-                    except Exception as e:
-                        logger.error(f"Ошибка при отзыве маршрутов группы '{group_name}': {e}")
-                        console_logger.error(f"Ошибка отзыва группы '{group_name}': {e}")
+            try:
+                withdraw_routes_bulk(group_name, routes, force=True)
+            except Exception as e:
+                logger.error(f"Ошибка при отзыве маршрутов группы '{group_name}': {e}")
+                console_logger.error(f"Ошибка отзыва группы '{group_name}': {e}")
 
     console_logger.info("Все маршруты отозваны")
     logger.info("Graceful shutdown завершен")
