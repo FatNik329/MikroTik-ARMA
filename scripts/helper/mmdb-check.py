@@ -1,6 +1,6 @@
 """
 Скрипт для анализа структуры MMDB файлов
-Использование: python3 check-mmdb.py /путь/к/файлу.mmdb
+Использование: python mmdb-check.py /путь/к/файлу.mmdb
 """
 
 import sys
