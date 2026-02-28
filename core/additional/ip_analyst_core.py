@@ -381,10 +381,13 @@ def process_ips_with_mmdb(
             if country not in country_include:
                 skip_filtered = True
 
-        # ЕСЛИ указаны страны в country_exclude
+        # Если указаны страны в country_exclude
         if country_exclude:
             if country in country_exclude:
                 skip_filtered = True
+
+        if asn == 'ASPRIVATE':
+            skip_filtered = True
 
         # Если IP не проходит фильтры, пропускаем его для asn_group_map
         if skip_filtered:
@@ -428,7 +431,7 @@ def generate_rsc_content_mmdb(
     lines = ['/ip firewall address-list']
     threshold = prefix_threshold
 
-    # Функция для проверки приватных адресов
+    # Функция для проверки приватных адресов (BOGON)
     def is_private_ip(ip_str: str) -> bool:
         try:
             ip = ipaddress.IPv4Address(ip_str)
@@ -436,34 +439,53 @@ def generate_rsc_content_mmdb(
         except:
             return True
 
+    private_ip_count_total = 0
+    filtered_asn_count = 0
+
     # Обрабатывает IP с ASN информацией
     for (asn, org, country), data in asn_group_map.items():
+        # BOGON Filtering
+        if asn == 'ASPRIVATE':
+            for ips in data['prefixes'].values():
+                private_ip_count_total += len(ips)
+            filtered_asn_count += 1
+            continue
+
         comment_base = f"{asn}:{org}:{country}"
 
         for prefix, ips in data['prefixes'].items():
-            if len(ips) >= threshold:
-                # Добавляет префикс
+            public_ips = [ip for ip in ips if not is_private_ip(ip)]
+
+            if not public_ips:
+                private_ip_count_total += len(ips)
+                continue
+            elif len(public_ips) >= threshold:
                 lines.append(
                     f'add address={prefix} list={list_name} '
-                    f'comment="{comment_base} -> IP={len(ips)}"'
+                    f'comment="{comment_base} -> IP={len(public_ips)}"'
                 )
             else:
-                # Добавляет отдельные IP
-                for ip in ips:
+                # Добавляет отдельные публичные IP
+                for ip in public_ips:
                     lines.append(
                         f'add address={ip} list={list_name} '
                         f'comment="{comment_base} -> {prefix}"'
                     )
 
-    private_ip_count = 0
+            private_ip_count_total += (len(ips) - len(public_ips))
+
+    private_ip_count_no_asn = 0
     for ip in no_asn_ips:
         if not is_private_ip(ip):
             lines.append(f'add address={ip} list={list_name}')
         else:
-            private_ip_count += 1
+            private_ip_count_no_asn += 1
 
-    if private_ip_count > 0:
-        logger.info(f"Отфильтровано приватных адресов без ASN: {private_ip_count}")
+    if private_ip_count_total > 0 or private_ip_count_no_asn > 0:
+        logger.info(f"Отфильтровано Bogon IP из RSC: {private_ip_count_total + private_ip_count_no_asn} ")
+
+    if filtered_asn_count > 0:
+        logger.info(f"Пропущено групп с ASPRIVATE: {filtered_asn_count}")
 
     return '\n'.join(lines)
 
@@ -700,9 +722,21 @@ def generate_json_report(
             "prefix_threshold_applied": prefix_threshold
         }
 
+        # Функция Bogon filtered
+        def is_bogon_ip(ip_str: str) -> bool:
+            try:
+                ip = ipaddress.IPv4Address(ip_str)
+                return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved
+            except:
+                return True
+
         # Подготовка GEO распределения с детализацией по ASN
         geo_distribution = {}
         for (asn, org, country), data in asn_group_map.items():
+            # Пропускаем ASPRIVATE
+            if asn == 'ASPRIVATE':
+                continue
+
             if country not in geo_distribution:
                 geo_distribution[country] = {
                     "asn_count": 0,
@@ -711,33 +745,37 @@ def generate_json_report(
                     "asns": []
                 }
 
-            prefix_count = len(data['prefixes'])
-            ip_count = data['total_ips']
+            # Фильтр Bogon IP ASN
+            asn_public_ips = 0
+            asn_public_prefixes = 0
+            prefixes_info = []
 
-            geo_distribution[country]["asn_count"] += 1
-            geo_distribution[country]["ip_count"] += ip_count
-            geo_distribution[country]["prefix_count"] += prefix_count
-
-            # Детальная информация по каждому ASN в стране
-            asn_info = {
-                "asn": asn,
-                "org": org,
-                "ip_count": ip_count,
-                "prefix_count": prefix_count,
-                "prefixes": []
-            }
-
-            # Информация о префиксах конкретного ASN
             for prefix, ips in data['prefixes'].items():
-                prefix_info = {
-                    "network": str(prefix),
-                    "ip_count": len(ips),
-                    "aggregated": len(ips) >= prefix_threshold,
-                    "ips": sorted(ips)  # Все IP адреса в префиксе
-                }
-                asn_info["prefixes"].append(prefix_info)
+                public_ips = [ip for ip in ips if not is_bogon_ip(ip)]
+                if public_ips:
+                    asn_public_ips += len(public_ips)
+                    asn_public_prefixes += 1
+                    prefixes_info.append({
+                        "network": str(prefix),
+                        "ip_count": len(public_ips),
+                        "aggregated": len(public_ips) >= prefix_threshold,
+                        "ips": sorted(public_ips)
+                    })
 
-            geo_distribution[country]["asns"].append(asn_info)
+            if asn_public_ips > 0:
+                geo_distribution[country]["asn_count"] += 1
+                geo_distribution[country]["ip_count"] += asn_public_ips
+                geo_distribution[country]["prefix_count"] += asn_public_prefixes
+
+                # Детальная информация по каждому ASN в стране
+                asn_info = {
+                    "asn": asn,
+                    "org": org,
+                    "ip_count": asn_public_ips,
+                    "prefix_count": asn_public_prefixes,
+                    "prefixes": prefixes_info
+                }
+                geo_distribution[country]["asns"].append(asn_info)
 
         # Сортировка ASN внутри каждой страны по количеству IP
         for country in geo_distribution:
@@ -745,28 +783,56 @@ def generate_json_report(
 
         # Иерархия данных (ASN → Prefixes → IPs)
         asn_hierarchy = []
+
+        total_bogon_filtered = 0
+
         for (asn, org, country), data in asn_group_map.items():
+            # Пропуск ASPRIVATE
+            if asn == 'ASPRIVATE':
+                for ips in data['prefixes'].values():
+                    total_bogon_filtered += len(ips)
+                continue
+
             asn_entry = {
                 "asn": asn,
                 "org": org,
                 "country": country,
-                "total_ips": data['total_ips'],
-                "prefix_count": len(data['prefixes']),
+                "total_ips": 0,
+                "prefix_count": 0,
                 "prefixes": []
             }
 
+            prefix_count = 0
+
             for prefix, ips in data['prefixes'].items():
+                # Фильтр Bogon IP
+                public_ips = [ip for ip in ips if not is_bogon_ip(ip)]
+
+                if not public_ips:
+                    total_bogon_filtered += len(ips)
+                    continue
+
+                total_bogon_filtered += (len(ips) - len(public_ips))
+
                 prefix_entry = {
                     "network": str(prefix),
-                    "ip_count": len(ips),
-                    "aggregated": len(ips) >= prefix_threshold,
-                    "ips": sorted(ips)
+                    "ip_count": len(public_ips),
+                    "aggregated": len(public_ips) >= prefix_threshold,
+                    "ips": sorted(public_ips)
                 }
                 asn_entry["prefixes"].append(prefix_entry)
+                asn_entry["total_ips"] += len(public_ips)
+                prefix_count += 1
 
-            # Сортировка префиксов по количеству IP
-            asn_entry["prefixes"].sort(key=lambda x: x["ip_count"], reverse=True)
-            asn_hierarchy.append(asn_entry)
+            if asn_entry["prefixes"]:
+                asn_entry["prefix_count"] = prefix_count
+                # Сортировка префиксов по количеству IP
+                asn_entry["prefixes"].sort(key=lambda x: x["ip_count"], reverse=True)
+                asn_hierarchy.append(asn_entry)
+
+        # Статистика фильтрации
+        if total_bogon_filtered > 0 and logger:
+            logger.info(f"Отфильтровано Bogon IP из JSON отчета: {total_bogon_filtered}")
 
         # Сортировка ASN по количеству IP
         asn_hierarchy.sort(key=lambda x: x["total_ips"], reverse=True)
@@ -898,7 +964,7 @@ def save_json_report(report_data: Dict[str, Any], output_path: Path, logger=None
     try:
         with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(report_data, f, ensure_ascii=False, indent=2)
-        logger.info(f"JSON отчет сохранен: {output_path}")
+        logger.debug(f"JSON отчет сохранен: {output_path}")
     except Exception as e:
         logger.error(f"Ошибка при сохранении JSON отчета: {e}")
         raise
@@ -997,7 +1063,7 @@ class IpAnalystCore:
                 mapping_file_path = mapping_file_raw
             elif isinstance(mapping_file_raw, list):
                 if len(mapping_file_raw) > 0:
-                    mapping_file_path = mapping_file_raw[0]  # берем первый элемент
+                    mapping_file_path = mapping_file_raw[0]
                 else:
                     mapping_file_path = 'none'
             else:
