@@ -1,6 +1,7 @@
 import logging
 import os
 import ssl
+import ipaddress
 from pathlib import Path
 from datetime import datetime, timedelta
 from routeros_api import RouterOsApiPool
@@ -15,16 +16,22 @@ API_PORT = 8728                  # API port (8728)
 API_SSL_PORT = 8729              # API-SSL port (8729)
 SSL = True                       # Use SSL (True/False)
 
-ADDRESS_LISTS = ['list-IPServices']    # Список адрес-листов для экспорта. Можно перечислить несколько, через ",".
-EXPORT_TYPE = 'all'              # Тип выгружаемых данных 'static' - статичные, 'dynamic' - динамичные, или 'all' - все .
-OUTPUT_DIR = 'raw-data/list-IPServices'   # Директория для выходных данных
-MAX_AGE = '1000d 00:00:00'         # Максимальный возраст записей (формат "dd hh:mm:ss") - старше удаляются
+ADDRESS_LISTS = ['list-IPServices']     # Список адрес-листов для экспорта. Можно перечислить несколько, через ",".
+EXPORT_TYPE = 'all'                     # Тип выгружаемых данных 'static' - статичные, 'dynamic' - динамичные, или 'all' - все .
+OUTPUT_DIR = 'raw-data/list-IPServices' # Директория для выходных данных
+MAX_AGE = '1000d 00:00:00'              # Максимальный возраст записей (формат "dd hh:mm:ss") - старше удаляются
 '''
 Пояснение к MAX_AGE - макс. значение на MikroTik в разделе Address Lists для параметра Creation-Time = 248d 00:00:00 (RouterOS 6,7) .
 Если выставить значение > 248d 00:00:00, скрипт не будет находить старые записи, соответственно, удаления старых записей не будет происходить.
 Может пригодиться, если записи не нужно удалять из листа.
 '''
+# Фильтрация при выгрузке (True - игнорировать, False - не игнорировать)
+IGNORE_DOMAIN = True    # Игнорировать доменные имена
+IGNORE_IPS = False      # Игнорировать IP-адреса и префиксы
 
+# ===========
+# ЛОГИРОВАНИЕ
+# ===========
 # Автоматическое определение имени лог файла
 # Получаем имя текущего скрипта без расширения .py
 script_name = Path(__file__).stem  # Например: "getting_saving_addressLists-ExampleDevices"
@@ -44,6 +51,50 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
+
+# ==========
+# ФУНКЦИОНАЛ
+# ==========
+def is_ip_address(address: str) -> bool:
+    """
+    Проверяет, является ли строка IP-адресом или префиксом (IPv4/IPv6).
+    Возвращает True для IP, False для доменных имен.
+    """
+    try:
+        # Очищаем строку от пробелов
+        address = address.strip()
+
+        # Если строка пустая
+        if not address:
+            return False
+
+        # Разделяет адрес и маску CIDR
+        parts = address.split('/')
+        base_address = parts[0]
+
+        # Проверяет, является ли основная часть IP-адресом
+        ipaddress.ip_address(base_address)
+
+        # Проверяет на корректность CIDR
+        if len(parts) == 2:
+            try:
+                mask = int(parts[1])
+                # Для IPv4 маска от 0 до 32, для IPv6 от 0 до 128
+                if '.' in base_address:  # IPv4
+                    if not (0 <= mask <= 32):
+                        return False
+                else:  # IPv4
+                    if not (0 <= mask <= 128):
+                        return False
+            except ValueError:
+                return False
+
+        return True
+
+    except (ValueError, ipaddress.AddressValueError):
+        return False
+    except Exception:
+        return False
 
 def parse_mikrotik_time(time_str: str) -> datetime:
     """Конвертирует время MikroTik (например 'aug/18/2025 06:42:22') в datetime."""
@@ -138,9 +189,8 @@ def check_address_list_exists(api, list_name: str) -> bool:
         logging.error(f"Ошибка при проверке существования адрес-листа: {e}")
         return False
 
-
 def get_address_list_entries(api, list_name: str, entry_type: str = 'all') -> Optional[List[str]]:
-    """Получает записи из адрес-листа MikroTik."""
+    """Получает записи из адрес-листа MikroTik с фильтрацией по типу адреса."""
     try:
         ipv4_resource = api.get_resource('/ip/firewall/address-list')
 
@@ -152,9 +202,46 @@ def get_address_list_entries(api, list_name: str, entry_type: str = 'all') -> Op
         items = ipv4_resource.get(**params)
 
         entries = []
+        skipped_domains = 0
+        skipped_ips = 0
+
         for item in items:
             if 'address' in item:
-                entries.append(item['address'])
+                address = item['address'].strip()
+
+                if not address:  # Пропуск пустых адресов
+                    continue
+
+                # Определяет тип адреса
+                is_ip = is_ip_address(address)
+
+                # Применяет фильтры
+                should_skip = False
+
+                if IGNORE_DOMAIN and not is_ip:
+                    should_skip = True
+                    skipped_domains += 1
+                    logging.debug(f"Пропущен домен: {address}")
+
+                elif IGNORE_IPS and is_ip:
+                    should_skip = True
+                    skipped_ips += 1
+                    logging.debug(f"Пропущен IP: {address}")
+
+                if not should_skip:
+                    entries.append(address)
+
+        if IGNORE_DOMAIN or IGNORE_IPS:
+            total_filtered = skipped_domains + skipped_ips
+            filter_info = []
+
+            if IGNORE_DOMAIN and skipped_domains > 0:
+                filter_info.append(f"домены: {skipped_domains}")
+            if IGNORE_IPS and skipped_ips > 0:
+                filter_info.append(f"IP: {skipped_ips}")
+
+            if filter_info:
+                logging.info(f"Фильтрация листа '{list_name}': пропущено {', '.join(filter_info)} записей")
 
         logging.info(f"Найдено {len(entries)} записей в адрес-листе '{list_name}' (тип: {entry_type})")
         return entries if entries else None
@@ -162,7 +249,6 @@ def get_address_list_entries(api, list_name: str, entry_type: str = 'all') -> Op
     except Exception as e:
         logging.error(f"Ошибка при получении адрес-листа '{list_name}': {e}")
         return None
-
 
 def save_to_file(addresses: Union[List[str], None], list_name: str, output_dir: str) -> bool:
     """Сохраняет адреса в текстовый файл, перезаписывая предыдущие данные."""
@@ -196,6 +282,15 @@ def main():
     """Основная функция процесса экспорта и очистки."""
     logging.info("\n=== Запуск %s - выгрузка адрес-листов MikroTik ===", script_name)
 
+    # Добавляет информацию о фильтрах
+    if IGNORE_DOMAIN or IGNORE_IPS:
+        filter_info = []
+        if IGNORE_DOMAIN:
+            filter_info.append("домены")
+        if IGNORE_IPS:
+            filter_info.append("IP-адреса")
+        logging.info(f"Фильтрация: игнорируем {', '.join(filter_info)}")
+
     # Подключаемся к MikroTik
     port = API_SSL_PORT if SSL else API_PORT
     pool = None
@@ -211,7 +306,7 @@ def main():
 
         # Обрабатываем каждый адрес-лист
         for list_name in ADDRESS_LISTS:
-            # Проверяем существование адрес-листа
+            # Проверяет существование адрес-листа
             if not check_address_list_exists(api, list_name):
                 logging.warning(f"Адрес-лист '{list_name}' не существует на устройстве")
                 save_to_file(None, list_name, OUTPUT_DIR)
@@ -223,7 +318,7 @@ def main():
             # Получаем актуальные адреса из листа
             addresses = get_address_list_entries(api, list_name, EXPORT_TYPE)
 
-            # Сохраняем в файл
+            # Сохраняет в файл
             if not save_to_file(addresses, list_name, OUTPUT_DIR):
                 logging.error(f"Не удалось сохранить адрес-лист '{list_name}'")
 
