@@ -31,6 +31,7 @@ main_start:
       logs_rotate: false                      ### Запускать скрипт logs_rotate.py (True/False)
 
   settings_cache:                            # Раздел настроек кэша актуальности скриптов. Допустимые параметры (m/h/d/false - минуты/часы/дни/отключен)
+    restart_after_error: 6                   ## Время (час) ожидания после ошибки перед повторным запуском скрипта
     base:                                    ## Актуальность запусков основного функционала
       dns_fwd: "3h"
       fetch_as_prefixes: "1d"
@@ -77,13 +78,21 @@ main_start:
       - "Ошибка парсинга JSON"
       - "Ошибка безопасного сохранения"
 
-  scripts_discovery:                   # Секция расширения функционала Additional
-    additional:
-      patterns:                        # Паттерн масок скриптов (влияет на очередность исполнения)
-        - "backup_Mikrotik-*.py"       # Группа выполнится 1-й
-        - "get_IP_Connections-*.py"    # Группа выполнится 2-й
-        - "yaml_to_txt-*.py"           # Группа выполнится 3-й
-        - "json_to_txt-*.py"           # ...
+  scripts_discovery:                   # Секция расширения функционала оркестратора
+    base:                              ## Базовая группа
+      patterns: ["*.py"]
+      base_name_patterns:
+        dns_fwd: "^dns_fwd"
+        fetch_as_prefixes: "^fetch_as_prefixes"
+        converter_addressLists: "^converter_addressLists"
+        sync_master: "^sync_master"
+        sync_slave: "^sync_slave"
+    additional:                        ## Дополнительная группа
+      patterns:                        ### Паттерн масок скриптов (влияет на очередность исполнения)
+        - "backup_Mikrotik-*.py"       ### Группа выполнится 1-й
+        - "get_IP_Connections-*.py"    ### Группа выполнится 2-й
+        - "yaml_to_txt-*.py"           ### Группа выполнится 3-й
+        - "json_to_txt-*.py"           ### ...
         - "ip_analyst-*.py"            
         - "lm_sensors-*.py"
         - "filter_results_dns-*.py"
@@ -101,6 +110,11 @@ main_start:
         yaml_to_txt: "^yaml_to_txt"
         json_to_txt: "^json_to_txt"
         gen_filter_forwarding: "^gen_filter_forwarding"
+    maintenance:                      ## Техническая группа
+      patterns: ["*.py"]
+      base_name_patterns:
+        logs_rotate: "^logs_rotate"
+
 
 # Настройки скрипта dns_fwd.py
 # ============================
