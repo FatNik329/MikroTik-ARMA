@@ -115,6 +115,11 @@ main_start:
       base_name_patterns:
         logs_rotate: "^logs_rotate"
 
+  execution_order: # Порядок исполнения групп
+    - base         ## 1-я группа
+    - additional   ## 2-я группа
+    - maintenance  ## 3-я группа
+
 
 # Настройки скрипта dns_fwd.py
 # ============================
