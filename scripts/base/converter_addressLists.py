@@ -133,11 +133,19 @@ def load_config():
                 "ipv6": False
             },
             "skip_asn": False
-        }
+        },
+        "list_name": []
     }
     try:
         with open("configs/config.yaml", "r") as f:
             user_config = yaml.safe_load(f).get("converter_add_list", {})
+
+        # Обработка list_name
+        if "list_name" not in user_config:
+            user_config["list_name"] = []
+        elif isinstance(user_config["list_name"], str):
+            user_config["list_name"] = [user_config["list_name"]]
+
         if "settings_gen" in user_config:
             if "skip_ips" in user_config["settings_gen"]:
                 if isinstance(user_config["settings_gen"]["skip_ips"], bool):
@@ -792,9 +800,19 @@ def main():
         if not input_dir.exists():
             logger.error(f"Директория {input_dir} не существует!")
             return
+
+        # Получение списка имён для обработки из конфига
+        target_lists = config.get("list_name", [])
+
         for list_dir in input_dir.iterdir():
             if not list_dir.is_dir():
                 continue
+
+            # Фильтрация по list_name из конфига
+            if target_lists and list_dir.name not in target_lists:
+                logger.debug(f"Пропуск директории {list_dir.name} (не в списке обработки)")
+                continue
+
             logger.info(f"\n=== Обработка списка: {list_dir.name} ===")
             processed = False
             # Обработка DNS данных
