@@ -198,6 +198,8 @@ converter_add_list:
   logging:                    # Настройки логирования
     log_level: "INFO"         ## Уровень детализации логов: DEBUG, INFO, WARNING, ERROR, CRITICAL
 
+  list_name: ["Example Lists1", "..."]  ## Обработка конкретных Address Lists
+
   settings_gen:                # Настройки генерации файлов *.rsc
     skip_domains: false        ## Пропустить генерацию файлов с доменами (true/false)
     skip_ips: false            ## Пропустить генерацию файлов с IP на основе доменных имён (true/false)
