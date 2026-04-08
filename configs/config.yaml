@@ -286,6 +286,7 @@ ip_analyst:
     country_exclude: 'none' # Фильтрация для ислючения по коду страны
     remove_last_seen: 100 # Удаляет IP адреса старшее N дней
     report_generation: true  # или false - создает отчет об обработанных данных в отдельном файле
+    exclude_non_aggregated_ips: false  # True/False - включить исключение одиночных IP
 
 #---------------
 #ExampleScripts2 <- 2-й пример скрипта-клиента из scripts/additional/ip_analyst/
