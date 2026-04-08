@@ -34,6 +34,7 @@ DEFAULT_CONFIG = {
     'country_exclude': 'none', # Пример: фильтрация для исключения на основе кода страны ['US', 'FR', 'RU', ...]. Без фильтраации: none
     'remove_last_seen': 55,  # Исключать IP, которые не появлялись более N дней (поддерживает ТОЛЬКО целые числа - дни). Без фильтрации: None
     'report_generation': 'true', # true/false - генерировать подробный отчёт об обработанных данных
+    'exclude_non_aggregated_ips': 'false', # true/false - исключает одиночные IP
 }
 
 def main():
