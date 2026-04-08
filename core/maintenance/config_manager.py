@@ -1,5 +1,5 @@
 """
-Универсальный менеджер конфигураций для модулей системы MikroTik-ARMA.
+Универсальный менеджер конфигураций для модулей системы ARMA.
 Поддерживает приоритет: YAML конфиг > DEFAULT_CONFIG скрипта
 """
 
@@ -71,6 +71,8 @@ def load_module_config_from_yaml(
 
         if script_config:
             logging.info(f"Загружена YAML конфигурация для {module_name}/{script_key}")
+        else:
+            logging.info(f"Загружена клиентская конфигурация для {module_name}/{script_key}")
 
         return dict(script_config)
 
