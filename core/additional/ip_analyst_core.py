@@ -175,8 +175,6 @@ def load_ip_lists_from_paths(paths_input, days_threshold=None, logger=None) -> T
 
                             if days_threshold is not None:
                                 logger.info(f"Загружен YAML файл {filename}: {len(all_historical_ips)} IP-адресов из historical (после фильтрации по времени)")
-                            else:
-                                logger.info(f"Загружен YAML файл {filename}: {len(all_historical_ips)} IP-адресов из historical")
 
                         else:
                             logger.warning(f"YAML файл {filename} имеет нестандартную структуру, пропускаем")
@@ -308,7 +306,7 @@ def get_asn_info(ip: str, mmdb_reader: maxminddb.Reader, field_mapping: Optional
             org_key = 'org'
             country_key = 'country_code'
 
-        # Извлекаем данные с учетом маппинга полей
+        # Извлекает данные с учетом маппинга полей
         asn_info = {
             'asn': result.get(asn_key, 'ASUNKNOWN'),
             'org': result.get(org_key, 'Unknown'),
@@ -389,7 +387,7 @@ def process_ips_with_mmdb(
         if asn == 'ASPRIVATE':
             skip_filtered = True
 
-        # Если IP не проходит фильтры, пропускаем его для asn_group_map
+        # Если IP не проходит фильтры, пропускает его для asn_group_map
         if skip_filtered:
             continue
 
@@ -422,6 +420,7 @@ def generate_rsc_content_mmdb(
     no_asn_ips: List[str],
     list_name: str,
     prefix_threshold: int,
+    exclude_non_aggregated_ips: bool = False,
     logger=None
 ) -> str:
     """Генерирует содержимое .rsc файла"""
@@ -441,6 +440,7 @@ def generate_rsc_content_mmdb(
 
     private_ip_count_total = 0
     filtered_asn_count = 0
+    excluded_ips_count = 0  # Для подсчета исключенных IP
 
     # Обрабатывает IP с ASN информацией
     for (asn, org, country), data in asn_group_map.items():
@@ -465,7 +465,13 @@ def generate_rsc_content_mmdb(
                     f'comment="{comment_base} -> IP={len(public_ips)}"'
                 )
             else:
-                # Добавляет отдельные публичные IP
+                # Исключает одиночные IP -> exclude_non_aggregated_ips: true
+                if exclude_non_aggregated_ips:
+                    excluded_ips_count += len(public_ips)
+                    private_ip_count_total += (len(ips) - len(public_ips))
+                    continue
+
+                # Добавление отдельных публичных IP
                 for ip in public_ips:
                     lines.append(
                         f'add address={ip} list={list_name} '
@@ -474,18 +480,29 @@ def generate_rsc_content_mmdb(
 
             private_ip_count_total += (len(ips) - len(public_ips))
 
+    # Обработка IP без ASN информации
     private_ip_count_no_asn = 0
-    for ip in no_asn_ips:
-        if not is_private_ip(ip):
-            lines.append(f'add address={ip} list={list_name}')
-        else:
-            private_ip_count_no_asn += 1
+    if not exclude_non_aggregated_ips:
+        for ip in no_asn_ips:
+            if not is_private_ip(ip):
+                lines.append(f'add address={ip} list={list_name}')
+            else:
+                private_ip_count_no_asn += 1
+    else:
+        # При исключении - подсчитывает приватные
+        for ip in no_asn_ips:
+            if is_private_ip(ip):
+                private_ip_count_no_asn += 1
+        excluded_ips_count += (len(no_asn_ips) - private_ip_count_no_asn)
 
     if private_ip_count_total > 0 or private_ip_count_no_asn > 0:
-        logger.info(f"Отфильтровано Bogon IP из RSC: {private_ip_count_total + private_ip_count_no_asn} ")
+        logger.info(f"Отфильтровано Bogon IP из RSC: {private_ip_count_total + private_ip_count_no_asn}")
 
     if filtered_asn_count > 0:
         logger.info(f"Пропущено групп с ASPRIVATE: {filtered_asn_count}")
+
+    if exclude_non_aggregated_ips and excluded_ips_count > 0:
+        logger.info(f"Исключено одиночных публичных IP (не достигших порога {threshold}): {excluded_ips_count}")
 
     return '\n'.join(lines)
 
@@ -673,6 +690,7 @@ def generate_json_report(
     script_name: str,
     output_filename_base: str,
     prefix_threshold: int,
+    exclude_non_aggregated_ips: bool = False,
     logger=None
 ) -> Dict[str, Any]:
     """
@@ -695,6 +713,7 @@ def generate_json_report(
                 "country_include": config.get('country_include'),
                 "country_exclude": config.get('country_exclude'),
                 "prefix_threshold": prefix_threshold,
+                "exclude_non_aggregated_ips": exclude_non_aggregated_ips,
                 "report_generation": config.get('report_generation', False)
             }
         }
@@ -719,7 +738,8 @@ def generate_json_report(
             "total_prefixes": aggregated_prefixes + individual_prefixes,
             "aggregated_prefixes": aggregated_prefixes,
             "individual_prefixes": individual_prefixes,
-            "prefix_threshold_applied": prefix_threshold
+            "prefix_threshold_applied": prefix_threshold,
+            "exclude_non_aggregated_ips": exclude_non_aggregated_ips
         }
 
         # Функция Bogon filtered
@@ -732,9 +752,14 @@ def generate_json_report(
 
         # Подготовка GEO распределения с детализацией по ASN
         geo_distribution = {}
+        excluded_ips_count = 0  # Подсчёт исключенных IP
+        total_bogon_filtered = 0  # Общий счётчик BOGON
+
         for (asn, org, country), data in asn_group_map.items():
-            # Пропускаем ASPRIVATE
+            # Пропускает ASPRIVATE
             if asn == 'ASPRIVATE':
+                for ips in data['prefixes'].values():
+                    total_bogon_filtered += len(ips)
                 continue
 
             if country not in geo_distribution:
@@ -752,15 +777,27 @@ def generate_json_report(
 
             for prefix, ips in data['prefixes'].items():
                 public_ips = [ip for ip in ips if not is_bogon_ip(ip)]
-                if public_ips:
-                    asn_public_ips += len(public_ips)
-                    asn_public_prefixes += 1
-                    prefixes_info.append({
-                        "network": str(prefix),
-                        "ip_count": len(public_ips),
-                        "aggregated": len(public_ips) >= prefix_threshold,
-                        "ips": sorted(public_ips)
-                    })
+
+                if not public_ips:
+                    total_bogon_filtered += len(ips)
+                    continue
+
+                total_bogon_filtered += (len(ips) - len(public_ips))
+
+                # Исключение неагрегированных IP
+                if exclude_non_aggregated_ips and len(public_ips) < prefix_threshold:
+                    # Исключает одиночные публичные IP (не достигшие порога - exclude_non_aggregated_ips)
+                    excluded_ips_count += len(public_ips)
+                    continue
+
+                asn_public_ips += len(public_ips)
+                asn_public_prefixes += 1
+                prefixes_info.append({
+                    "network": str(prefix),
+                    "ip_count": len(public_ips),
+                    "aggregated": len(public_ips) >= prefix_threshold,
+                    "ips": sorted(public_ips)
+                })
 
             if asn_public_ips > 0:
                 geo_distribution[country]["asn_count"] += 1
@@ -784,13 +821,9 @@ def generate_json_report(
         # Иерархия данных (ASN → Prefixes → IPs)
         asn_hierarchy = []
 
-        total_bogon_filtered = 0
-
         for (asn, org, country), data in asn_group_map.items():
             # Пропуск ASPRIVATE
             if asn == 'ASPRIVATE':
-                for ips in data['prefixes'].values():
-                    total_bogon_filtered += len(ips)
                 continue
 
             asn_entry = {
@@ -809,10 +842,11 @@ def generate_json_report(
                 public_ips = [ip for ip in ips if not is_bogon_ip(ip)]
 
                 if not public_ips:
-                    total_bogon_filtered += len(ips)
                     continue
 
-                total_bogon_filtered += (len(ips) - len(public_ips))
+                if exclude_non_aggregated_ips and len(public_ips) < prefix_threshold:
+                    excluded_ips_count += len(public_ips)
+                    continue
 
                 prefix_entry = {
                     "network": str(prefix),
@@ -830,17 +864,38 @@ def generate_json_report(
                 asn_entry["prefixes"].sort(key=lambda x: x["ip_count"], reverse=True)
                 asn_hierarchy.append(asn_entry)
 
+        unprocessed_ips_list = []
+        no_asn_excluded_count = 0
+
+        if exclude_non_aggregated_ips:
+            # При exclude_non_aggregated_ips: true - исключает ВСЕ no_asn_ips
+            for ip in no_asn_ips:
+                if is_bogon_ip(ip):
+                    total_bogon_filtered += 1
+                else:
+                    excluded_ips_count += 1
+                    no_asn_excluded_count += 1
+        else:
+            for ip in no_asn_ips:
+                if not is_bogon_ip(ip):
+                    unprocessed_ips_list.append(ip)
+                else:
+                    total_bogon_filtered += 1
+
         # Статистика фильтрации
         if total_bogon_filtered > 0 and logger:
             logger.info(f"Отфильтровано Bogon IP из JSON отчета: {total_bogon_filtered}")
+
+        if exclude_non_aggregated_ips and excluded_ips_count > 0:
+            logger.info(f"Исключено одиночных публичных IP (не достигших порога {prefix_threshold}): {excluded_ips_count}")
 
         # Сортировка ASN по количеству IP
         asn_hierarchy.sort(key=lambda x: x["total_ips"], reverse=True)
 
         # Необработанные IP (без ASN)
         unprocessed_ips = {
-            "no_asn": sorted(no_asn_ips),
-            "count": len(no_asn_ips)
+            "no_asn": sorted(unprocessed_ips_list),
+            "count": len(unprocessed_ips_list)
         }
 
         # Сводка по всем ASN (включая отфильтрованные)
@@ -854,12 +909,25 @@ def generate_json_report(
                     country = map_country
                     break
 
+            # Определяет, попал ли ASN в финальный RSC после всех фильтров
+            in_final_rsc = False
+            for (map_asn, _, _), data in asn_group_map.items():
+                if map_asn == asn:
+                    # Проверяет, есть ли у этого ASN префиксы после исключения неагрегированных
+                    for prefix, ips in data['prefixes'].items():
+                        public_ips = [ip for ip in ips if not is_bogon_ip(ip)]
+                        if public_ips:
+                            if not (exclude_non_aggregated_ips and len(public_ips) < prefix_threshold):
+                                in_final_rsc = True
+                                break
+                    break
+
             all_asn_summary.append({
                 "asn": asn,
                 "org": org,
                 "country": country,
                 "total_ips": count,
-                "in_final_rsc": asn in [a for (a, _, _) in asn_group_map.keys()]
+                "in_final_rsc": in_final_rsc
             })
 
         # Сортировка по количеству IP
@@ -874,19 +942,38 @@ def generate_json_report(
 
         # 1. Детальная статистика по ASN (аналогично логам)
         if asn_counter_all:
-            # Фильтруем только ASN из asn_group_map (которые попали в RSC)
+            # Фильтрует только ASN из asn_group_map
             filtered_asn_stats = []
             for (asn, org, country), data in asn_group_map.items():
+                # Пропускает ASPRIVATE
+                if asn == 'ASPRIVATE':
+                    continue
+
                 total_count = asn_counter_all.get(asn, 0)
-                prefix_count = len(data['prefixes'])
-                ip_count_in_map = data['total_ips']
+
+                valid_prefixes = []
+                for prefix, ips in data['prefixes'].items():
+                    public_ips = [ip for ip in ips if not is_bogon_ip(ip)]
+                    if public_ips:
+                        if not (exclude_non_aggregated_ips and len(public_ips) < prefix_threshold):
+                            valid_prefixes.append(prefix)
+
+                if not valid_prefixes:
+                    continue
+
+                prefix_count = len(valid_prefixes)
+                ip_count_in_map = sum(
+                    len([ip for ip in ips if not is_bogon_ip(ip) and not (exclude_non_aggregated_ips and len([ip2 for ip2 in ips if not is_bogon_ip(ip2)]) < prefix_threshold)])
+                    for prefix, ips in data['prefixes'].items()
+                    if prefix in valid_prefixes
+                )
 
                 # Рассчет среднего IP на префикс
                 avg_per_prefix = ip_count_in_map / prefix_count if prefix_count > 0 else 0
 
                 asn_stat = {
                     "asn": asn,
-                    "org": org[:50] + "..." if len(org) > 50 else org,  # Обрезка длинных названия
+                    "org": org[:50] + "..." if len(org) > 50 else org,
                     "country": country,
                     "total_ips": total_count,
                     "prefixes_in_rsc": prefix_count,
@@ -903,7 +990,7 @@ def generate_json_report(
         if geo_distribution:
             geo_stats = []
             for country, data in geo_distribution.items():
-                # Получает список ASN для этой страны
+                # Получает список ASN для этой страны (только те, что попали в RSC)
                 asn_list = [asn_info["asn"] for asn_info in data["asns"]]
 
                 geo_stat = {
@@ -920,11 +1007,14 @@ def generate_json_report(
             geo_stats.sort(key=lambda x: x["ip_count"], reverse=True)
             summary["geo_statistics"] = geo_stats
 
-        # 3. Ключевые метрики
+        # 3. Ключевые метрики (корректирует с учетом исключенных IP)
+        ips_in_final_rsc = sum(data['total_ips'] for data in asn_hierarchy) + len(unprocessed_ips_list)
+
         summary["key_metrics"] = {
             "total_ips_processed": statistics["total_ips_processed"],
-            "ips_in_final_rsc": statistics["ips_with_asn_processed"] + statistics["ips_no_asn"],
-            "unique_asns_in_rsc": statistics["unique_asns"],
+            "ips_in_final_rsc": ips_in_final_rsc,
+            "ips_excluded_by_threshold": excluded_ips_count + no_asn_excluded_count,
+            "unique_asns_in_rsc": len(asn_hierarchy),
             "unique_countries": len(geo_distribution),
             "aggregation_efficiency": {
                 "total_prefixes": statistics["total_prefixes"],
@@ -946,7 +1036,9 @@ def generate_json_report(
             "all_asn_summary": all_asn_summary,
             "aggregation_info": {
                 "threshold": prefix_threshold,
-                "description": f"Префиксы с {prefix_threshold}+ IP агрегируются в /24 сети"
+                "exclude_non_aggregated_ips": exclude_non_aggregated_ips,
+                "description": f"Префиксы с {prefix_threshold}+ IP агрегируются в /24 сети" +
+                              (" Одиночные IP исключены из RSC и отчета." if exclude_non_aggregated_ips else "")
             }
         }
 
@@ -985,7 +1077,7 @@ def load_mmdb_mapping(file_path: str, logger=None) -> Optional[Dict[str, Any]]:
 
         logger.info(f"Файл маппинга MMDB загружен: {abs_path}")
 
-        # Извлекаем только mapping для удобства использования
+        # Извлекает только mapping для удобства использования
         field_mapping = mapping.get('field_mapping', {})
 
         # Проверяем наличие обязательных полей
@@ -1007,15 +1099,15 @@ class IpAnalystCore:
        self.script_name = script_name if script_name else Path(__file__).stem
        self.field_mapping = None
 
-       # Получаем логгер для ядра
+       # Получает логгер для ядра
        self.logger = logging.getLogger(self.script_name)
 
     def run(self) -> None:
         """Основной метод, который выполняет всю логику"""
-        self.logger.info(f"\n=== Запуск {self.script_name} - генератор RSC из MMDB ASN ===")
+        self.logger.info(f"\n=== Запуск {self.script_name} - аналитик IP адресов ===")
 
         try:
-            # Получаем все значения из конфига
+            # Получает все значения из конфига
             config = self.config
 
             ip_list_dir = config['ip_list_dir']
@@ -1081,7 +1173,10 @@ class IpAnalystCore:
                            f"- Включение стран: {country_include if country_include else 'Отключен'}\n"
                            f"- Исключение стран: {country_exclude if country_exclude and len(country_exclude) > 0 else 'Отключено'}\n"
                            f"- Фильтр по времени: {f'{remove_last_seen} дней (применяется к JSON/YAML файлам)' if remove_last_seen is not None else 'Отключен'}\n"
-                           f"- Генерация отчета: {'Включена' if config.get('report_generation', False) else 'Отключена'}\n")
+                           f"- Генерация отчета: {'Включена' if config.get('report_generation', False) else 'Отключена'}\n"
+                           f"- Порог агрегации префиксов (prefix_threshold): {prefix_threshold}\n"
+                           f"- Исключение неагрегированных IP: {'Включено' if config.get('exclude_non_aggregated_ips', False) else 'Отключено'}\n")
+
 
             # Загрузка файла маппинга
             self.logger.info("Загрузка файла маппинга полей MMDB...")
@@ -1226,6 +1321,7 @@ class IpAnalystCore:
                         script_name=self.script_name,
                         output_filename_base=output_filename_base,
                         prefix_threshold=prefix_threshold,
+                        exclude_non_aggregated_ips=config.get('exclude_non_aggregated_ips', False),
                         logger=self.logger
                     )
 
@@ -1272,8 +1368,11 @@ class IpAnalystCore:
 
     def generate_rsc_content_mmdb(self, asn_group_map, no_asn_ips, list_name):
         prefix_threshold = self.config['prefix_threshold']
+        exclude_non_aggregated_ips = self.config.get('exclude_non_aggregated_ips', False)
         return generate_rsc_content_mmdb(
-            asn_group_map, no_asn_ips, list_name, prefix_threshold, self.logger
+            asn_group_map, no_asn_ips, list_name, prefix_threshold,
+            exclude_non_aggregated_ips,
+            self.logger
         )
 
     def print_detailed_asn_statistics(self, asn_counter_all, asn_group_map,
