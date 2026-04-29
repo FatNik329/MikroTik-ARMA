@@ -682,29 +682,21 @@ def parse_query_log(log_path, domain_configs):
                     line = line.decode("utf-8").strip()
 
                     try:
-                        if not line.startswith('['):
-                            file_malformed_lines += 1
-                            total_malformed_lines += 1
-                            continue
+                        # Парсинг LTSV формата (key:value)
+                        # Пример: time:1777360953 host:192.168.255.150 message:example.com type:A return:FORWARD cached:0 duration:0 server:127.0.0.1:5353
+                        parts_dict = {}
+                        for item in line.split():
+                            if ':' in item:
+                                # Разделяет по первому двоеточию, значение может содержать ':'
+                                key, value = item.split(':', 1)
+                                parts_dict[key] = value
 
-                        # Разделяет строку на части
-                        parts = line.split(']', 1)
-                        if len(parts) < 2:
-                            file_malformed_lines += 1
-                            total_malformed_lines += 1
-                            continue
+                        domain = parts_dict.get('message', '').lower()
+                        record_type = parts_dict.get('type', '').upper()
+                        dns_server = parts_dict.get('server', 'unknown')
 
-                        # Получает оставшуюся часть строки после даты
-                        rest = parts[1].strip().split()
-                        if len(rest) < 3:
-                            file_malformed_lines += 1
-                            total_malformed_lines += 1
-                            continue
-
-                        domain = rest[1].lower()
-                        record_type = rest[2].upper()
-
-                        if record_type not in ('A', 'AAAA'):
+                        # Пропуск строк без домена или с неподходящим типом
+                        if not domain or record_type not in ('A', 'AAAA'):
                             continue
 
                         # Обработка матчинга доменов
@@ -721,10 +713,11 @@ def parse_query_log(log_path, domain_configs):
                                                 'wildcards': set() if any('*' in t for t in targets) else None
                                             }
 
-                                        # Сохраняет домен и шаблон, по которому он был обнаружен
+                                        # Сохраняет домен, шаблон и DNS-сервер (только при первом обнаружении)
                                         if domain not in results[list_name][category]['domains']:
                                             results[list_name][category]['domains'][domain] = {
-                                                'target_template': f"{category} -> {target}"
+                                                'target_template': f"{category} -> {target}",
+                                                'resolved_by_dns': dns_server
                                             }
 
                                         if is_wildcard:
@@ -789,7 +782,8 @@ def get_recent_queries(config):
                 filtered.append({
                     "domain": q.get("domain", "").lower(),
                     "type": query_type,
-                    "timestamp": q.get("timestamp", "")
+                    "timestamp": q.get("timestamp", ""),
+                    "server": q.get("server", "unknown")
                 })
 
         logger.info(f"Получено {len(filtered)} запросов из metrics API")
@@ -818,6 +812,7 @@ def process_queries_from_api(queries, domain_configs):
     for query in queries:
         domain = query["domain"]
         query_type = query["type"]
+        dns_server = query.get("server", "unknown")
 
         for list_name, categories in domain_configs.items():
             for category, targets in categories.items():
@@ -832,10 +827,11 @@ def process_queries_from_api(queries, domain_configs):
                                 'wildcards': set() if any('*' in t for t in targets) else None
                             }
 
-                        # Сохраняет домен и шаблон
+                        # Сохраняет домен, шаблон и DNS-сервер (только при первом обнаружении)
                         if domain not in results[list_name][category]['domains']:
                             results[list_name][category]['domains'][domain] = {
-                                'target_template': f"{category} -> {target}"
+                                'target_template': f"{category} -> {target}",
+                                'resolved_by_dns': dns_server
                             }
 
                         if is_wildcard:
@@ -1040,7 +1036,10 @@ def parse_jsonl_log(jsonl_config, domain_configs):
                         domain = record.get("query_name", "").lower()
 
                         if not domain:
-                            continue  # Пропустить записи без query_name
+                            continue  # Пропустить запись без query_name
+
+                        # Извлечение DNS-сервера (если есть)
+                        dns_server = record.get("server", "unknown")
 
                         # Фильтрация по времени записи (timestamp_field)
                         if time_filter_hours:
@@ -1073,9 +1072,11 @@ def parse_jsonl_log(jsonl_config, domain_configs):
                                                 'wildcards': set() if any('*' in t for t in targets) else None
                                             }
 
+                                        # Сохраняет домен, шаблон и DNS-сервер (только при первом обнаружении)
                                         if domain not in results[list_name][category]['domains']:
                                             results[list_name][category]['domains'][domain] = {
-                                                'target_template': f"{category} -> {target}"
+                                                'target_template': f"{category} -> {target}",
+                                                'resolved_by_dns': dns_server
                                             }
 
                                         file_matches += 1
@@ -1184,7 +1185,7 @@ def save_results(results, dns_servers, timeout, config, domain_records):
             ("categories", {})
         ])
 
-        # 1. Копируем все старые категории (даже, если их нет в новых результатах)
+        # 1. Копирует все старые категории (даже, если их нет в новых результатах)
         if "categories" in existing_data:
             for old_category, old_domains in existing_data["categories"].items():
                 if old_category not in new_data["categories"]:
@@ -1274,6 +1275,10 @@ def save_results(results, dns_servers, timeout, config, domain_records):
                                 "last_seen": now.strftime("%Y-%m-%d %H:%M:%S"),
                                 "target_template": data['domains'][domain]['target_template']
                             }
+
+                            # Добавляет информацию о DNS-сервере (если имеется)
+                            if 'resolved_by_dns' in data['domains'][domain]:
+                                domain_data["resolved_by_dns"] = data['domains'][domain]['resolved_by_dns']
 
                             current_time = now.strftime("%Y-%m-%d %H:%M:%S")
 
