@@ -281,11 +281,13 @@ ip_analyst:
     output_filename: 'My-NewExampleList' # Имя используемое для названия файла и формируемого AddressList (RSC)
 
     prefix_threshold: 3 # Количество IP адресов в префиксе для его агрегации
-    asn_filter: 'none' # Фильтрация по ASN
-    country_include: 'none' # Фильтрация для включения по коду страны
-    country_exclude: 'none' # Фильтрация для ислючения по коду страны
-    remove_last_seen: 100 # Удаляет IP адреса старшее N дней
+    asn_include: 'none' # Фильтрация по ASN (включение). Пример: ['AS12345', 'AS23456']
+    asn_exclude: 'none' # Фильтрация по ASN (исключение). Пример: ['AS12345', 'AS23456']
+    country_include: 'none' # Фильтрация для включения по коду страны. Пример ["AZ", "AM"]
+    country_exclude: 'none' # Фильтрация для ислючения по коду страны. Пример ["AZ", "AM"]
+    remove_last_seen: 100 # Удаляет IP адреса старшее N дней. Работает только с JSON, YAML.
     report_generation: true  # или false - создает отчет об обработанных данных в отдельном файле
+    prefix_size: 24 # Размер префикса агрегации. Поддерживает от /16 до /32, по умолчанию /24.
     exclude_non_aggregated_ips: false  # True/False - включить исключение одиночных IP
 
 #---------------
