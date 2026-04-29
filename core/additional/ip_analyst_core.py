@@ -334,9 +334,11 @@ def get_asn_info(ip: str, mmdb_reader: maxminddb.Reader, field_mapping: Optional
 def process_ips_with_mmdb(
     ips: List[str],
     mmdb_reader: maxminddb.Reader,
-    asn_filter: Optional[List[str]] = None,
+    asn_include: Optional[List[str]] = None,
+    asn_exclude: Optional[List[str]] = None,
     country_include: Optional[List[str]] = None,
     country_exclude: Optional[List[str]] = None,
+    prefix_size=None,
     field_mapping: Optional[Dict[str, Any]] = None,
     logger=None
 ) -> Tuple[Dict[Tuple[str, str, str], Dict[str, Any]], List[str], Dict[str, int]]:
@@ -370,8 +372,12 @@ def process_ips_with_mmdb(
 
         skip_filtered = False
 
-        if asn_filter:
-            if asn not in asn_filter:
+        if asn_include:
+            if asn not in asn_include:
+                skip_filtered = True
+
+        if asn_exclude:
+            if asn in asn_exclude:
                 skip_filtered = True
 
         # Если указаны страны в country_include
@@ -393,7 +399,8 @@ def process_ips_with_mmdb(
 
         # Определяет префикс (/24 для IPv4)
         ip_obj = ipaddress.IPv4Address(ip)
-        prefix = ipaddress.IPv4Network(f"{ip_obj}/24", strict=False)
+        #prefix = ipaddress.IPv4Network(f"{ip_obj}/24", strict=False)
+        prefix = ipaddress.IPv4Network(f"{ip_obj}/{prefix_size}", strict=False)
 
         # Группирует по ASN, Org, Country (только IP, прошедшие фильтры)
         key = (asn_info['asn'], asn_info['org'], asn_info['country'])
@@ -510,7 +517,7 @@ def print_detailed_asn_statistics(
     asn_counter_all: Dict[str, int],
     asn_group_map: Dict[Tuple[str, str, str], Dict[str, Any]],
     total_ips_processed: int,
-    asn_filter: Optional[List[str]] = None,
+    asn_include: Optional[List[str]] = None,
     logger=None
 ) -> None:
     """
@@ -543,9 +550,9 @@ def print_detailed_asn_statistics(
     stats_list.sort(key=lambda x: x[3], reverse=True)
 
     # Фильтрует только указанные ASN, если фильтр активен
-    if asn_filter:
-        stats_list = [(asn, org, country, count) for asn, org, country, count in stats_list if asn in asn_filter]
-        logger.info(f"Показаны только ASN из фильтра ({len(asn_filter)} шт.):")
+    if asn_include:
+        stats_list = [(asn, org, country, count) for asn, org, country, count in stats_list if asn in asn_include]
+        logger.info(f"Показаны только ASN из фильтра ({len(asn_include)} шт.):")
 
     # Выводит статистику
     total_shown = sum(count for _, _, _, count in stats_list)
@@ -573,7 +580,7 @@ def print_detailed_asn_statistics(
             logger.info(f"  {asn}:{org_short}:{country} -> {count} IP ({percentage:.2f}%)")
 
     # Если есть ASN не показанные из-за фильтра
-    if asn_filter and total_shown < total_ips_processed:
+    if asn_include and total_shown < total_ips_processed:
         other_count = total_ips_processed - total_shown
         other_percentage = (other_count / total_ips_processed) * 100
         logger.info(f"  Остальные ASN: {other_count} IP ({other_percentage:.2f}%)")
@@ -690,6 +697,7 @@ def generate_json_report(
     script_name: str,
     output_filename_base: str,
     prefix_threshold: int,
+    prefix_size: int = 24,
     exclude_non_aggregated_ips: bool = False,
     logger=None
 ) -> Dict[str, Any]:
@@ -709,11 +717,13 @@ def generate_json_report(
                 "ip_list_dir": config.get('ip_list_dir'),
                 "dns_file_filter": config.get('dns_file_filter'),
                 "remove_last_seen": config.get('remove_last_seen'),
-                "asn_filter": config.get('asn_filter'),
+                "asn_include": config.get('asn_include'),
+                "asn_exclude": config.get('asn_exclude'),
                 "country_include": config.get('country_include'),
                 "country_exclude": config.get('country_exclude'),
                 "prefix_threshold": prefix_threshold,
                 "exclude_non_aggregated_ips": exclude_non_aggregated_ips,
+                "prefix_size": prefix_size,
                 "report_generation": config.get('report_generation', False)
             }
         }
@@ -1037,7 +1047,7 @@ def generate_json_report(
             "aggregation_info": {
                 "threshold": prefix_threshold,
                 "exclude_non_aggregated_ips": exclude_non_aggregated_ips,
-                "description": f"Префиксы с {prefix_threshold}+ IP агрегируются в /24 сети" +
+                "description": f"Префиксы с {prefix_threshold}+ IP агрегируются в /{prefix_size} сети" +
                               (" Одиночные IP исключены из RSC и отчета." if exclude_non_aggregated_ips else "")
             }
         }
@@ -1118,19 +1128,35 @@ class IpAnalystCore:
             country_include_raw = config['country_include']
             country_exclude_raw = config.get('country_exclude', 'none')
             output_filename_config = config['output_filename']
-            asn_filter_raw = config['asn_filter']
+            asn_include_raw = config['asn_include']
+            asn_exclude_raw = config.get('asn_exclude', 'none')
             prefix_threshold = config['prefix_threshold']
+            prefix_size = config.get('prefix_size', 24)
             mapping_file_raw = config.get('mapping_file_path', 'none')
 
             # Преобразование параметров:
-            # Обработка asn_filter
-            asn_filter = None
-            if isinstance(asn_filter_raw, str) and asn_filter_raw.lower() == 'none':
-                asn_filter = None
-            elif isinstance(asn_filter_raw, list) and len(asn_filter_raw) == 0:
-                asn_filter = None
+            if not isinstance(prefix_size, int) or prefix_size < 16 or prefix_size > 32:
+                self.logger.warning(f"Неверное значение prefix_size: {prefix_size}, должно быть 16-32. Используется значение по умолчанию 24")
+                prefix_size = 24
+
+            # Обработка asn_include
+            asn_include = None
+            if isinstance(asn_include_raw, str) and asn_include_raw.lower() == 'none':
+                asn_include = None
+            elif isinstance(asn_include_raw, list) and len(asn_include_raw) == 0:
+                asn_include = None
             else:
-                asn_filter = asn_filter_raw
+                asn_include = asn_include_raw
+
+            # Обработка asn_exclude
+            asn_exclude = None
+            if isinstance(asn_exclude_raw, str) and asn_exclude_raw.lower() == 'none':
+                asn_exclude = None
+            elif isinstance(asn_exclude_raw, list) and len(asn_exclude_raw) == 0:
+                asn_exclude = None
+            else:
+                asn_exclude = asn_exclude_raw
+
             # Обработка country_include
             country_include = None
             if isinstance(country_include_raw, str) and country_include_raw.lower() == 'none':
@@ -1169,12 +1195,14 @@ class IpAnalystCore:
                            f"- Файл маппинга полей: {'Стандартные поля' if mapping_file_path.lower() == 'none' else mapping_file_path}\n"
                            f"- Выходная директория: {output_dir}\n"
                            f"- Имя выходного файла/листа: {output_filename_config if output_filename_config != 'none' else 'По имени директории'}\n"
-                           f"- Фильтр ASN: {asn_filter if asn_filter else 'Отключен'}\n"
+                           f"- Включение ASN: {asn_include if asn_include else 'Отключен'}\n"
+                           f"- Исключение ASN: {asn_exclude if asn_exclude and len(asn_exclude) > 0 else 'Отключено'}\n"
                            f"- Включение стран: {country_include if country_include else 'Отключен'}\n"
                            f"- Исключение стран: {country_exclude if country_exclude and len(country_exclude) > 0 else 'Отключено'}\n"
                            f"- Фильтр по времени: {f'{remove_last_seen} дней (применяется к JSON/YAML файлам)' if remove_last_seen is not None else 'Отключен'}\n"
                            f"- Генерация отчета: {'Включена' if config.get('report_generation', False) else 'Отключена'}\n"
                            f"- Порог агрегации префиксов (prefix_threshold): {prefix_threshold}\n"
+                           f"- Размер префикса для агрегации (prefix_size): /{prefix_size}\n"
                            f"- Исключение неагрегированных IP: {'Включено' if config.get('exclude_non_aggregated_ips', False) else 'Отключено'}\n")
 
 
@@ -1215,9 +1243,11 @@ class IpAnalystCore:
             asn_group_map, no_asn_ips, asn_counter = self.process_ips_with_mmdb(
                 sorted(unique_ips),
                 mmdb_reader,
-                asn_filter,
+                asn_include,
+                asn_exclude,
                 country_include,
                 country_exclude,
+                prefix_size,
                 self.field_mapping
             )
 
@@ -1242,7 +1272,7 @@ class IpAnalystCore:
                 asn_counter_all=asn_counter,
                 asn_group_map=asn_group_map,
                 total_ips_processed=len(unique_ips),
-                asn_filter=asn_filter
+                asn_include=asn_include
             )
 
             self.print_geo_statistics(
@@ -1322,6 +1352,7 @@ class IpAnalystCore:
                         output_filename_base=output_filename_base,
                         prefix_threshold=prefix_threshold,
                         exclude_non_aggregated_ips=config.get('exclude_non_aggregated_ips', False),
+                        prefix_size=prefix_size,
                         logger=self.logger
                     )
 
@@ -1355,9 +1386,17 @@ class IpAnalystCore:
     def load_dns_ips(self, file_path: str) -> Set[str]:
         return load_dns_ips(file_path, self.logger)
 
-    def process_ips_with_mmdb(self, ips, mmdb_reader, asn_filter=None, country_include=None, country_exclude=None, field_mapping=None):
+    def process_ips_with_mmdb(self, ips, mmdb_reader, asn_include=None, asn_exclude=None, country_include=None, country_exclude=None, prefix_size=None, field_mapping=None):
+        if prefix_size is None:
+            prefix_size = self.config.get('prefix_size', 24)
+
         mapping_to_use = field_mapping if field_mapping is not None else self.field_mapping
-        return process_ips_with_mmdb(ips, mmdb_reader, asn_filter, country_include, country_exclude, mapping_to_use, self.logger)
+
+        return process_ips_with_mmdb(
+            ips, mmdb_reader, asn_include, asn_exclude,
+            country_include, country_exclude, prefix_size,
+            mapping_to_use, self.logger
+        )
 
     def validate_directory(self, dir_path: str, dir_description: str) -> str:
         return validate_directory(dir_path, dir_description, self.logger)
@@ -1376,9 +1415,9 @@ class IpAnalystCore:
         )
 
     def print_detailed_asn_statistics(self, asn_counter_all, asn_group_map,
-                                     total_ips_processed, asn_filter=None):
+                                     total_ips_processed, asn_include=None):
         return print_detailed_asn_statistics(
-            asn_counter_all, asn_group_map, total_ips_processed, asn_filter, self.logger
+            asn_counter_all, asn_group_map, total_ips_processed, asn_include, self.logger
         )
 
     def print_geo_statistics(self, asn_counter_all, asn_group_map, total_ips_processed):
