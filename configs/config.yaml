@@ -24,6 +24,7 @@ main_start:
       lm_sensors: false                        ### Запускать группу скриптов lm_sensors-*.py (True/False)
       tld_parser: false                        ### Запускать группу скриптов tld_parser.py (True/False)
       get_asn_mmdb: false                      ### Запускать группу скриптов get_asn_mmdb.py (True/False)
+      get_asn_prefixes: true
       yaml_to_txt: false                       ### Запускать группу скриптов yaml_to_txt.py (True/False)
       json_to_txt: true                        ### Запускать группу скриптов json_to_txt (True/False)
       gen_filter_forwarding: true
@@ -46,6 +47,7 @@ main_start:
       lm_sensors: "false"
       tld_parser: "1d"
       get_asn_mmdb: "14d"
+      get_asn_prefixes: "1h"
       yaml_to_txt: "4h"
       json_to_txt: "4h"
       gen_filter_forwarding: "12h"
@@ -77,6 +79,7 @@ main_start:
       - "Ошибка разбора YAML файла"
       - "Ошибка парсинга JSON"
       - "Ошибка безопасного сохранения"
+      - "ошибка при скачивании"
 
   scripts_discovery:                   # Секция расширения функционала оркестратора
     base:                              ## Базовая группа
@@ -98,6 +101,7 @@ main_start:
         - "filter_results_dns-*.py"
         - "tld_parser.py"
         - "get_asn_mmdb.py"
+        - "get_asn_prefixes.py"
         - "gen_filter_forwarding.py"
       base_name_patterns:
         backup_Mikrotik: "^backup_Mikrotik"
@@ -107,6 +111,7 @@ main_start:
         filter_results_dns: "^filter_results_dns"
         tld_parser: "^tld_parser"
         get_asn_mmdb: "^get_asn_mmdb"
+        get_asn_prefixes: "^get_asn_prefixes"
         yaml_to_txt: "^yaml_to_txt"
         json_to_txt: "^json_to_txt"
         gen_filter_forwarding: "^gen_filter_forwarding"
@@ -166,30 +171,39 @@ dns_fwd:
 fetch_as_prefixes:
 
   logging:                  # Настройки логирования
-    log_level: "INFO"       ## Уровень детализации логов: DEBUG, INFO, WARNING, ERROR, CRITICAL
+    log_level: "INFO"      # Уровень детализации логов: DEBUG, INFO, WARNING, ERROR, CRITICAL
 
-  cache_serv:               # Настройки кэша
-    ttl: 86400              ## Время актуальности кэша (сек.) = 24 часа
+  mode: "file"              # Режим работы: "api" или "file"
+  enable_gen_asn_txt: true  # Включает генерацию текстовых ASN файлов
+  path_save_asn_txt:        # Пути сохранения TXT файлов каждого листа
+    ExampleList1: "/path/to/ExampleList1/TXT"
+    ExampleList2: "/path/to/ExampleList2/TXT"
+
+
+  cache_raw_results:        # Настройки кэша
+    ttl: 43200              # Время актуальности кэша (сек.) = 12 час
 
   settings_api:             # Настройки API получения префиксов ASN
-    delay: 2                ## Задержка между запросами
-    max_retries: 2          ## Количество запросов при неудачной попытке
-    user_agent: "ARMA - Get-Prefix - example@mail.com" # Настройки HTTP User-Agent. Укажите свои данные.
+    delay: 15               # Задержка между запросами
+    max_retries: 2          # Количество запросов при неудачной попытке
+    user_agent: "MikroTik-ARMA - Get-Prefix - example@mail.com" # Настройки HTTP User-Agent. Укажите свои данные.
 
-  source_priority:          # Настройка приоритетов внеших источников
-    - "ripe_stat"           ## Первый приоритет
-    - "bgp_tools"           ## Третий приоритет
+  source_priority:      # Настройка приоритетов внеших источников
+    - "bgp_tools"       # Первый приоритет
+    - "ripe_stat"       # Второй приоритет
 
-  url_service:              # URL внешних сервисов для получения префиксов
+  url_service:     # URL внешних сервисов для получения префиксов - {asn} будет заменён на номер AS без "AS"
     ripe_stat: "https://stat.ripe.net/data/announced-prefixes/data.json?resource={asn}"
     bgp_tools: "https://bgp.tools/table.txt"
 
-  ip_type:                  # Настройки получаемых префиксов
-    ipv4: true              ## true/false получать префиксы IPv4
-    ipv6: true              ## true/false получать префиксы IPv6
+  ip_type:       # Настройки получаемых префиксов
+    ipv4: true   # true/false получать префиксы IPv4
+    ipv6: false  # true/false получать префиксы IPv6
 
-  storage_raw_data:         # Настройки хранения необработанных данных
-    backup_files: 3         ## Количество хранимых бэкапов (по умолчанию 3)
+  storage_raw_data:    # Настройки хранения сырых данных
+    backup_files: 3    # Количество хранимых бэкапов (по умолчанию 3)
+    path_external_data: "/path/to/ARMA/raw-data/ASN-db/prefixes"  # Путь к данным для file режима
+
     
 # Настройки скрипта converter_addressLists.py
 # ===========================================
