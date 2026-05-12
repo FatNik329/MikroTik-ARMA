@@ -40,7 +40,10 @@ def load_config():
     config_path = Path("configs/config.yaml")
     with open(config_path) as f:
         config = yaml.safe_load(f)
-    return config["fetch_as_prefixes"]
+    fetch_config = config["fetch_as_prefixes"]
+    if 'mode' not in fetch_config:
+        fetch_config['mode'] = 'api'
+    return fetch_config
 
 def get_address_lists(name_list=None):
     """Получает список AddressLists для обработки"""
@@ -76,13 +79,126 @@ def get_paths(list_name):
         "raw_data": Path(f"raw-data/{list_name}/AS/results-as.json")
     }
 
+def parse_as_list_with_markers(as_list: list, asns_mapping: dict, config: dict) -> list:
+    """
+    Парсит список AS с поддержкой специальных маркеров.
+
+    Маркеры:
+    - "!AS<number>" - исключить конкретный AS
+    - "!CC_<code>" - исключить все AS из указанной страны (code - двухбуквенный код)
+    - "__ALL_AS__" - включить все AS из table.jsonl
+
+    Args:
+        as_list: Исходный список из as_list.json5
+        asns_mapping: Словарь {ASN: {'name': ..., 'cc': ...}}
+        config: Конфигурация (для получения ip_type фильтров)
+
+    Returns:
+        list: Отфильтрованный список ASN для обработки
+    """
+    include_all = False
+    exclude_asns = set()
+    exclude_countries = set()
+    explicit_asns = set()
+
+    for item in as_list:
+        if not isinstance(item, str):
+            logging.warning(f"Игнорирует нестроковый элемент: {item}")
+            continue
+
+        item = item.strip()
+
+        # Маркер "все AS"
+        if item == "__ALL_AS__":
+            include_all = True
+            logging.info("Обнаружен маркер __ALL_AS__: будут обработаны все AS из table.jsonl")
+
+        # Маркер исключения конкретного AS
+        elif item.startswith("!AS"):
+            asn = item[1:]
+            exclude_asns.add(asn)
+            logging.debug(f"Исключает AS: {asn}")
+
+        # Маркер исключения страны
+        elif item.startswith("!CC_"):
+            country_code = item[4:]
+            exclude_countries.add(country_code.upper())
+            logging.info(f"Исключает страну: {country_code}")
+
+        # Обычный AS (только если не включен режим __ALL_AS__)
+        elif not include_all:
+            # Проверяет формат ASN
+            if item.startswith("AS"):
+                explicit_asns.add(item)
+            else:
+                logging.warning(f"Неверный формат ASN (должен начинаться с AS): {item}")
+
+    # Формирует финальный список
+    if include_all:
+        # Берет все AS из mapping
+        all_asns = set(asns_mapping.keys())
+
+        # Применяет исключения
+        result_asns = all_asns - exclude_asns
+
+        # Исключает по странам
+        if exclude_countries:
+            country_excluded_asns = {
+                asn for asn, data in asns_mapping.items()
+                if data.get('cc', '').upper() in exclude_countries
+            }
+            result_asns -= country_excluded_asns
+            logging.info(f"Исключено AS по странам {exclude_countries}: {len(country_excluded_asns)} шт")
+
+        logging.info(f"Итоговое количество AS для обработки: {len(result_asns)} (из {len(all_asns)} всего)")
+        return sorted(list(result_asns))
+    else:
+        # Использует только явно указанные AS
+        result_asns = explicit_asns - exclude_asns
+
+        # Исключает по странам
+        if exclude_countries:
+            country_excluded = {
+                asn for asn in result_asns
+                if asns_mapping.get(asn, {}).get('cc', '').upper() in exclude_countries
+            }
+            result_asns -= country_excluded
+            if country_excluded:
+                logging.info(f"Исключено AS по странам {exclude_countries}: {', '.join(sorted(country_excluded))}")
+
+        logging.info(f"Итоговое количество AS для обработки: {len(result_asns)} (из {len(explicit_asns)} указанных)")
+        return sorted(list(result_asns))
+
+def main():
+    args = parse_args()
+    config = load_config()
+
+    logging.info("\n===== Запуск fetch_as_prefixes.py - получение префиксов ASN  =====")
+    logging.info(f"Режим работы: {config.get('mode', 'api')}")
+
+    # Получение списков для обработки
+    try:
+        lists = get_address_lists(args.name_list)
+        logging.info(f"Найдены списки для обработки: {lists}")
+
+    except Exception as e:
+        logging.error(f"Ошибка получения списка AddressLists: {e}")
+        sys.exit(1)
+
+    # Обработка каждого AddressList
+    for list_name in lists:
+        logging.info(f"\n=== Начало обработки AddressList: {list_name} ===")
+        process_list(list_name, config)
+
+    logging.info("===== Скрипт успешно выполнен! =====")
+
 def check_duplicates(as_list: list) -> list:
     """Проверяет и удаляет дубликаты AS номеров"""
     duplicates = {k: v for k, v in Counter(as_list).items() if v > 1}
     if duplicates:
         for asn, count in duplicates.items():
             logging.warning(f"Найден дубликат: {asn} (количество: {count})")
-        return list(dict.fromkeys(as_list))  # Удаляет дубли с сохранением порядка
+        return list(dict.fromkeys(as_list))  # Удаляет дубли с сохранениет порядка
     return as_list
 
 def get_hash(data: list) -> str:
@@ -97,7 +213,7 @@ def load_cache(cache_file: Path) -> dict:
                 return json.load(f)
         return {}
     except json.JSONDecodeError:
-        logging.warning(f"Ошибка чтения кеша {cache_file}, создаём новый")
+        logging.warning(f"Ошибка чтения кеша {cache_file}, создание нового.")
         return {}
 
 def save_cache(cache_file: Path, data: dict):
@@ -110,8 +226,8 @@ def fetch_api(asn: str, cache_file: Path, url: str, api_name: str, config, **kwa
     cache = load_cache(cache_file)
     start_time = time.time()
 
-    if asn in cache and (time.time() - cache[asn]["timestamp"] < config['cache_serv']['ttl']):
-        logging.info(f"Кэш сервиса {api_name} для {asn} актуален (время в кэше: {time.time() - cache[asn]['timestamp']:.2f} сек)")
+    if asn in cache and (time.time() - cache[asn]["timestamp"] < config['cache_raw_results']['ttl']):
+        logging.info(f"Кэш сервиса {api_name} для {asn} актуален (вретя в кэше: {time.time() - cache[asn]['timestamp']:.2f} сек)")
         return cache[asn]["prefixes"]
 
     for attempt in range(config['settings_api']['max_retries']):
@@ -213,25 +329,112 @@ def fetch_bgptools(asn: str, cache_file: Path, config, **kwargs) -> list:
         **kwargs
     )
 
+def load_asns_mapping(asns_file: Path) -> dict:
+    """
+    Загружает CSV с соответствием ASN -> информация.
+
+    Returns:
+        dict: {ASN: {'name': str, 'cc': str, 'class': str}}
+    """
+    asn_mapping = {}
+    try:
+        with open(asns_file, 'r', encoding='utf-8') as f:
+            # Читает заголовок
+            header = f.readline().strip().split(',')
+            # Определяет индексы колонок
+            col_index = {col: idx for idx, col in enumerate(header)}
+
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+
+                parts = line.split(',')
+                if not parts or not parts[0].startswith('AS'):
+                    continue
+
+                asn = parts[0]
+
+                # Извлекает данные с проверкой наличия колонок
+                asn_mapping[asn] = {
+                    'name': parts[col_index.get('name', 1)] if len(parts) > col_index.get('name', 1) else "",
+                    'class': parts[col_index.get('class', 2)] if len(parts) > col_index.get('class', 2) else "",
+                    'cc': parts[col_index.get('cc', 3)] if len(parts) > col_index.get('cc', 3) else ""
+                }
+
+        logging.info(f"Загружено {len(asn_mapping)} ASN из {asns_file}")
+        return asn_mapping
+
+    except Exception as e:
+        logging.error(f"Ошибка загрузки ASN mapping: {e}")
+        return {}
+
 def should_update(asn: str, prefixes: list, output_dir: Path) -> bool:
     """Определяет, нужно ли обновлять файл"""
     file_path = output_dir / f"{asn}.txt"
     if not file_path.exists():
         return True
 
-    with open(file_path) as f:
-        old_content = f.read().splitlines()
+    try:
+        with open(file_path) as f:
+            old_content = f.read().splitlines()
+        return get_hash(prefixes) != get_hash(old_content)
+    except Exception as e:
+        logging.warning(f"Ошибка чтения файла {file_path}: {e}")
+        return True
 
-    return get_hash(prefixes) != get_hash(old_content)
+def save_as_file(asn: str, prefixes: list, output_dir: Path, list_name: str = None, config: dict = None, default_output_dir: Path = None):
+    """
+    Сохраняет префиксы в файл ТОЛЬКО если указан пользовательский путь.
 
-def save_as_file(asn: str, prefixes: list, output_dir: Path):
-    """Сохраняет префиксы в файл"""
-    output_dir.mkdir(parents=True, exist_ok=True)
-    file_path = output_dir / f"{asn}.txt"
+    Args:
+        asn: Номер AS
+        prefixes: Список префиксов
+        output_dir: Путь по умолчанию (не используется)
+        list_name: Имя AddressList (для получения пользовательского пути)
+        config: Конфигурация (для получения настроек путей)
+        default_output_dir: Стандартный путь raw-data (для проверки дублей)
+    """
+    # Если генерация отключена - выход
+    if not config or not config.get('enable_gen_asn_txt', False):
+        logging.debug(f"Генерация TXT файлов отключена в конфиге для {asn}")
+        return
 
-    with open(file_path, "w") as f:
-        f.write("\n".join(prefixes) + "\n")
-    logging.info(f"Сохранён файл: {file_path}")
+    # Получает пользовательский путь из конфига
+    custom_paths = config.get('path_save_asn_txt', {})
+
+    if list_name not in custom_paths:
+        logging.debug(f"Для листа {list_name} не указан пользовательский путь в path_save_asn_txt - TXT файл не создаётся")
+        return
+
+    custom_path = Path(custom_paths[list_name])
+
+    # Преобразует в абсолютный путь
+    if not custom_path.is_absolute():
+        custom_path = Path.cwd() / custom_path
+
+    # Проверка на совпадение пользовательского пути
+    if default_output_dir and custom_path.resolve() == default_output_dir.resolve():
+        logging.warning(f"Пользовательский путь для {list_name} совпадает со стандартным ({default_output_dir}).")
+        return
+
+    # Проверяет доступность директории
+    try:
+        custom_path.mkdir(parents=True, exist_ok=True)
+        logging.debug(f"Для листа {list_name} используется пользовательский путь для TXT файлов: {custom_path}")
+    except Exception as e:
+        logging.error(f"Не удалось создать пользовательскую директорию {custom_path}: {e}")
+        return
+
+    # Сохраняет файл
+    file_path = custom_path / f"{asn}.txt"
+
+    try:
+        with open(file_path, "w") as f:
+            f.write("\n".join(prefixes) + "\n")
+        logging.debug(f"Сохранён TXT файл (пользовательский путь): {file_path}")
+    except Exception as e:
+        logging.error(f"Ошибка сохранения TXT файла {file_path}: {e}")
 
 def save_results(list_name, data, config):
     """Сохранение результатов в raw-data"""
@@ -291,11 +494,13 @@ def process_list(list_name, config):
     """Обработка одного AddressList"""
     paths = get_paths(list_name)
 
+    mode = config.get('mode', 'api')
+
     # Загрузка AS номеров из конфига AS
     try:
         json5_path = paths["as_list"].with_suffix('.json5')
         with open(json5_path, 'r', encoding='utf-8') as f:
-            as_list = json5.load(f)
+            raw_as_list = json5.load(f)  # Сохраняет исходный список для маркеров
 
     except FileNotFoundError:
         logging.error(f"Файл {json5_path} не найден!")
@@ -308,18 +513,28 @@ def process_list(list_name, config):
         return
 
     # Проверка данных
-    if not isinstance(as_list, list):
+    if not isinstance(raw_as_list, list):
         logging.error(f"Неверный формат AS номеров в {list_name}")
         return
 
-    unique_as = check_duplicates(as_list)
-    if not unique_as:
+    unique_as = check_duplicates(raw_as_list)
+
+    if not unique_as and mode == 'api':
         logging.error("Список AS пуст после проверки дубликатов!")
         return
 
+    # Ветвление по режиму работы
+    if mode == 'api':
+        process_api_mode(list_name, unique_as, paths, config)
+    elif mode == 'file':
+        process_file_mode(list_name, raw_as_list, paths, config)
+    else:
+        logging.error(f"Неизвестный режим работы: {mode}")
+
+def process_api_mode(list_name, unique_as, paths, config):
+    """Обработка через API (существующая логика)"""
     results = {
         "metadata": {
-            "version": "1.1",
             "generated_at": datetime.now().isoformat(),
             "ipv4_enabled": config['ip_type']['ipv4'],
             "ipv6_enabled": config['ip_type']['ipv6'],
@@ -342,10 +557,7 @@ def process_list(list_name, config):
         sources = []
         need_data = config['ip_type']['ipv4'] or config['ip_type']['ipv6']
 
-        # Получение порядка источников загрузки из общего конфига
         source_order = config.get('source_priority', ['ripe_stat', 'bgp_tools'])
-
-        # Сопоставление имен источников из конфига
         source_dispatcher = {
             'ripe_stat': {
                 'fetch_func': fetch_ripe_stat,
@@ -362,14 +574,11 @@ def process_list(list_name, config):
         for source_key in source_order:
             if not need_data:
                 break
-
             source_config = source_dispatcher.get(source_key)
             if not source_config:
-                logging.warning(f"Указан неизвестный источник '{source_key}' в конфиге source_priority. Пропускаем.")
+                logging.warning(f"Указан неизвестный источник '{source_key}' в конфиге source_priority.")
                 continue
-
             prefixes = source_config['fetch_func'](asn, source_config['cache_file'], config)
-
             if prefixes:
                 all_prefixes.extend(prefixes)
                 sources.append(source_config['source_name'])
@@ -382,7 +591,6 @@ def process_list(list_name, config):
         prefixes_v4 = [p for p in all_prefixes if "." in p]
         prefixes_v6 = [p for p in all_prefixes if ":" in p]
 
-        # Сохранение в структуре результатов
         results["as_data"][asn] = {
             "prefixes_v4": list(dict.fromkeys(prefixes_v4)),
             "prefixes_v6": list(dict.fromkeys(prefixes_v6)),
@@ -390,26 +598,25 @@ def process_list(list_name, config):
             "last_updated": datetime.now().isoformat()
         }
 
-        file_path = paths["output"] / f"{asn}.txt"
-        if not file_path.exists() or should_update(asn, prefixes_v4 + prefixes_v6, paths["output"]):
+        # Сохраняет TXT файл с учетом пользовательских путей
+        all_prefixes_list = prefixes_v4 + prefixes_v6
+        save_as_file(asn, all_prefixes_list, paths["output"], list_name, config)
+
+        if should_update(asn, all_prefixes_list, paths["output"]):
             stats['updated'] += 1
         else:
             stats['skipped'] += 1
 
-        time.sleep(2)  # Задержка между запросами
+        time.sleep(2)
 
     # Обновление источников в метаданных
     used_sources = set()
-    if any("ripe_stat" in asn_data.get("sources", []) for asn_data in results["as_data"].values()):
-        used_sources.add("ripe_stat")
-    if any("bgp_tools" in asn_data.get("sources", []) for asn_data in results["as_data"].values()):
-        used_sources.add("bgp_tools")
+    for asn_data in results["as_data"].values():
+        used_sources.update(asn_data.get("sources", []))
     results["metadata"]["sources_used"] = list(used_sources)
 
-    # Сохранение результатов
     save_results(list_name, results, config)
 
-    # Итоговая статистика (без изменений)
     logging.info("\n=== Статистика обработки ===")
     logging.info(f"Всего AS: {stats['total']}")
     logging.info(f"Обновлено: {stats['updated']}")
@@ -417,11 +624,181 @@ def process_list(list_name, config):
     logging.info(f"Ошибок: {stats['failed']}")
     logging.info(f"=== Обработка {list_name} завершена ===")
 
+def process_file_mode(list_name, raw_as_list, paths, config):
+    """
+    Обработка через чтение локальных файлов с поддержкой маркеров.
+
+    Args:
+        list_name: Имя AddressList
+        raw_as_list: Исходный список из as_list.json5 (с маркерами)
+        paths: Словарь с путями к файлам
+        config: Конфигурация
+    """
+    logging.info(f"Режим file: чтение данных для {list_name}")
+
+    # Получает путь к директории с файлами из конфига
+    storage_path = config.get('storage_raw_data', {}).get('path_external_data')
+    if not storage_path:
+        logging.error("В конфиге отсутствует параметр storage_raw_data.path_external_data")
+        return
+
+    data_dir = Path(storage_path)
+    if not data_dir.is_absolute():
+        data_dir = Path.cwd() / data_dir
+
+    table_file = data_dir / "table.jsonl"
+    asns_file = data_dir / "asns.csv"
+
+    logging.info(f"Директория с данными: {data_dir}")
+    logging.info(f"Файл префиксов: {table_file}")
+    logging.info(f"Файл ASN mapping: {asns_file}")
+
+    try:
+        # Проверяет существование файлов
+        if not table_file.exists():
+            raise FileNotFoundError(f"Файл {table_file} не найден")
+        if not asns_file.exists():
+            raise FileNotFoundError(f"Файл {asns_file} не найден")
+
+        # Загружает ASN mapping (с данными о странах)
+        asn_mapping = load_asns_mapping(asns_file)
+        if not asn_mapping:
+            raise ValueError("Не удалось загрузить ASN mapping")
+
+        # Применяет маркеры из raw_as_list
+        filtered_as_list = parse_as_list_with_markers(raw_as_list, asn_mapping, config)
+
+        if not filtered_as_list:
+            logging.error("После применения маркеров не осталось AS для обработки.")
+            return
+
+        # Загружает префиксы из table.jsonl только для отфильтрованных AS
+        prefixes_data = load_prefixes_from_table(table_file, filtered_as_list, config)
+
+        # Формирует результаты
+        results = {
+            "metadata": {
+                "generated_at": datetime.now().isoformat(),
+                "ipv4_enabled": config['ip_type']['ipv4'],
+                "ipv6_enabled": config['ip_type']['ipv6'],
+                "sources_used": ["bgp_tools_file"],
+                "source_mode": "file",
+                "markers_processed": True
+            },
+            "as_data": {}
+        }
+
+        stats = {'total': len(filtered_as_list), 'updated': 0, 'skipped': 0, 'failed': 0}
+
+        for asn in filtered_as_list:
+            if asn not in prefixes_data:
+                logging.warning(f"ASN {asn} не найден в {table_file.name}")
+                stats['failed'] += 1
+                continue
+
+            asn_data = prefixes_data[asn]
+            prefixes_v4 = asn_data['prefixes_v4']
+            prefixes_v6 = asn_data['prefixes_v6']
+
+            if not prefixes_v4 and not prefixes_v6:
+                logging.warning(f"ASN {asn} не имеет префиксов (или фильтры IP отключены)")
+                stats['failed'] += 1
+                continue
+
+            # Добавляет информацию об AS из mapping
+            as_info = asn_mapping.get(asn, {})
+
+            results["as_data"][asn] = {
+                "prefixes_v4": prefixes_v4,
+                "prefixes_v6": prefixes_v6,
+                "sources": ["bgp_tools_file"],
+               # "last_updated": datetime.now().isoformat(),
+                "as_name": as_info.get('name', ''),
+                "as_class": as_info.get('class', ''),
+                "as_cc": as_info.get('cc', '')
+            }
+
+            # Сохраняет TXT файл с учетом пользовательских путей
+            all_prefixes = prefixes_v4 + prefixes_v6
+            save_as_file(asn, all_prefixes, paths["output"], list_name, config, paths["output"])
+
+            # Проверяет необходимость обновления
+            output_dir = paths["output"]
+            if not output_dir.exists() or should_update(asn, all_prefixes, output_dir):
+                stats['updated'] += 1
+            else:
+                stats['skipped'] += 1
+
+        stats['failed'] = len(filtered_as_list) - len(results["as_data"])
+
+        # Сохраняет общий результат
+        save_results(list_name, results, config)
+
+        # Логирует статистику с деталями по маркерам
+        logging.info("\n=== Статистика обработки (file mode) ===")
+        logging.info(f"Всего AS после фильтрации: {stats['total']}")
+        logging.info(f"Обновлено: {stats['updated']}")
+        logging.info(f"Пропущено: {stats['skipped']}")
+        logging.info(f"Не найдено/Ошибок: {stats['failed']}")
+
+        # Логирует информацию об исключенных AS, если были маркеры
+        if any(isinstance(x, str) and (x.startswith('!') or x == '__ALL_AS__') for x in raw_as_list):
+            logging.info("Были применены маркеры фильтрации из as_list.json5")
+
+        logging.info(f"=== Обработка {list_name} завершена ===")
+
+    except Exception as e:
+        logging.error(f"Ошибка в file mode: {e}")
+        raise
+
+def load_prefixes_from_table(table_file: Path, asn_list: list, config: dict) -> dict:
+    """Загружает префиксы из table.jsonl для указанных ASN"""
+    as_set = set(asn_list)
+    result = {asn: {'prefixes_v4': [], 'prefixes_v6': []} for asn in as_set}
+
+    try:
+        with open(table_file, 'r', encoding='utf-8') as f:
+            for line_num, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+
+                try:
+                    data = json.loads(line)
+                    asn_value = data.get('ASN')
+                    cidr = data.get('CIDR', '')
+
+                    # Формирует ключ ASN
+                    asn_key = f"AS{asn_value}" if not str(asn_value).startswith('AS') else str(asn_value)
+
+                    if asn_key in as_set:
+                        # Фильтрует по типу IP
+                        if '.' in cidr and config['ip_type']['ipv4']:
+                            result[asn_key]['prefixes_v4'].append(cidr)
+                        elif ':' in cidr and config['ip_type']['ipv6']:
+                            result[asn_key]['prefixes_v6'].append(cidr)
+
+                except json.JSONDecodeError as e:
+                    logging.warning(f"Ошибка парсинга строки {line_num}: {e}")
+                    continue
+
+    except Exception as e:
+        logging.error(f"Ошибка чтения {table_file}: {e}")
+        raise
+
+    # Удаляет дубликаты
+    for asn in result:
+        result[asn]['prefixes_v4'] = list(dict.fromkeys(result[asn]['prefixes_v4']))
+        result[asn]['prefixes_v6'] = list(dict.fromkeys(result[asn]['prefixes_v6']))
+
+    return result
+
 def main():
     args = parse_args()
     config = load_config()
 
     logging.info("\n===== Запуск fetch_as_prefixes.py - получение префиксов ASN  =====")
+    logging.info(f"Режим работы: {config.get('mode', 'api')}")
 
     # Получение списков для обработки
     try:
