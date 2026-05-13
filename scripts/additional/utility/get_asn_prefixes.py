@@ -417,9 +417,9 @@ class ASNPrefixesUpdater:
 
     def run(self) -> bool:
         """Запуск процесса обновления"""
-        logger.info("=" * 60)
-        logger.info("Запуск get_asn_prefixes - скачивание и проверка данных ASN и префиксов")
-        logger.info("=" * 60)
+        logger.info("=" * 73)
+        logger.info("Запуск get_asn_prefixes - получение данных об ASN и префиксах (bgp.tools)")
+        logger.info("=" * 73)
 
         # Вывод конфигурации
         logger.info("Текущая конфигурация:")
@@ -431,13 +431,13 @@ class ASNPrefixesUpdater:
         logger.info(f"  DOWNLOAD_TIMEOUT: {CONFIG['DOWNLOAD_TIMEOUT']} сек")
         logger.info(f"  MIN_FILE_SIZE: {CONFIG['MIN_FILE_SIZE']} байт")
         logger.info(f"  USER_AGENT: {CONFIG['USER_AGENT']}")
-        logger.info("=" * 60)
+        logger.info("=" * 73)
 
         prefixes_success = self.update_prefixes()
         asns_success = self.update_asns()
 
         # Итоговый вывод
-        logger.info("=" * 60)
+        logger.info("=" * 58)
         if prefixes_success and asns_success:
             logger.info("Процесс обновления данных ASN и префиксов успешно завершен")
         else:
@@ -446,7 +446,7 @@ class ASNPrefixesUpdater:
                 logger.warning("  - Не удалось обновить данные о префиксах")
             if not asns_success:
                 logger.warning("  - Не удалось обновить данные об ASN")
-        logger.info("=" * 60)
+        logger.info("=" * 58)
 
         return prefixes_success and asns_success
 
