@@ -85,7 +85,8 @@ def parse_as_list_with_markers(as_list: list, asns_mapping: dict, config: dict) 
 
     Маркеры:
     - "!AS<number>" - исключить конкретный AS
-    - "!CC_<code>" - исключить все AS из указанной страны (code - двухбуквенный код)
+    - "!CC_<code>" - исключить все AS из указанной страны
+    - "CC_<code>" - включить только AS из указанной страны (фильтр по странам)
     - "__ALL_AS__" - включить все AS из table.jsonl
 
     Args:
@@ -99,6 +100,7 @@ def parse_as_list_with_markers(as_list: list, asns_mapping: dict, config: dict) 
     include_all = False
     exclude_asns = set()
     exclude_countries = set()
+    include_countries = set()
     explicit_asns = set()
 
     for item in as_list:
@@ -125,21 +127,31 @@ def parse_as_list_with_markers(as_list: list, asns_mapping: dict, config: dict) 
             exclude_countries.add(country_code.upper())
             logging.info(f"Исключает страну: {country_code}")
 
-        # Обычный AS (только если не включен режим __ALL_AS__)
-        elif not include_all:
-            # Проверяет формат ASN
-            if item.startswith("AS"):
-                explicit_asns.add(item)
-            else:
-                logging.warning(f"Неверный формат ASN (должен начинаться с AS): {item}")
+        # Маркер включения страны
+        elif item.startswith("CC_"):
+            country_code = item[3:]
+            include_countries.add(country_code.upper())
+            logging.info(f"Включает только страну: {country_code}")
+
+        # Обычный AS
+        elif item.startswith("AS"):
+            explicit_asns.add(item)
+        else:
+            logging.warning(f"Неверный формат маркера или ASN: {item}")
 
     # Формирует финальный список
     if include_all:
-        # Берет все AS из mapping
         all_asns = set(asns_mapping.keys())
-
-        # Применяет исключения
         result_asns = all_asns - exclude_asns
+
+        # Применяет фильтрацию по странам (если указаны)
+        if include_countries:
+            country_filtered_asns = {
+                asn for asn, data in asns_mapping.items()
+                if data.get('cc', '').upper() in include_countries
+            }
+            result_asns &= country_filtered_asns
+            logging.info(f"Отфильтровано по странам {include_countries}: {len(country_filtered_asns)} AS найдено")
 
         # Исключает по странам
         if exclude_countries:
@@ -152,9 +164,47 @@ def parse_as_list_with_markers(as_list: list, asns_mapping: dict, config: dict) 
 
         logging.info(f"Итоговое количество AS для обработки: {len(result_asns)} (из {len(all_asns)} всего)")
         return sorted(list(result_asns))
+
     else:
-        # Использует только явно указанные AS
+        # Если есть фильтр по странам, но нет явных AS и нет __ALL_AS__
+        if include_countries and not explicit_asns:
+
+            logging.info(f"Режим фильтрации по странам без явных AS: будут взяты все AS из стран {include_countries}")
+            all_asns = set(asns_mapping.keys())
+
+            # Выбирает AS только из указанных стран
+            result_asns = {
+                asn for asn, data in asns_mapping.items()
+                if data.get('cc', '').upper() in include_countries
+            }
+
+            result_asns -= exclude_asns
+
+            if exclude_countries:
+                country_excluded = {
+                    asn for asn in result_asns
+                    if asns_mapping.get(asn, {}).get('cc', '').upper() in exclude_countries
+                }
+                result_asns -= country_excluded
+                if country_excluded:
+                    logging.info(f"Исключено AS по странам {exclude_countries}: {len(country_excluded)} шт")
+
+            logging.info(f"Итоговое количество AS для обработки: {len(result_asns)} (все из стран {include_countries})")
+            return sorted(list(result_asns))
+
         result_asns = explicit_asns - exclude_asns
+
+        # Применяет фильтрацию по странам для явно указанных AS
+        if include_countries:
+            country_filtered = {
+                asn for asn in result_asns
+                if asns_mapping.get(asn, {}).get('cc', '').upper() in include_countries
+            }
+            result_asns = country_filtered
+            if result_asns:
+                logging.info(f"Отфильтровано по странам {include_countries}: {len(result_asns)} AS из {len(explicit_asns)} указанных")
+            else:
+                logging.warning(f"Ни один из указанных AS не находится в странах {include_countries}")
 
         # Исключает по странам
         if exclude_countries:
@@ -168,6 +218,30 @@ def parse_as_list_with_markers(as_list: list, asns_mapping: dict, config: dict) 
 
         logging.info(f"Итоговое количество AS для обработки: {len(result_asns)} (из {len(explicit_asns)} указанных)")
         return sorted(list(result_asns))
+
+def count_txt_files(custom_path: Path, list_name: str, config: dict) -> tuple:
+    """
+    Подсчитывает количество созданных TXT файлов и возвращает путь к директории.
+
+    Returns:
+        tuple: (путь_к_директории, количество_файлов)
+    """
+    if not config or not config.get('enable_gen_asn_txt', False):
+        return None, 0
+
+    custom_paths = config.get('path_save_asn_txt', {})
+    if list_name not in custom_paths:
+        return None, 0
+
+    txt_dir = Path(custom_paths[list_name])
+    if not txt_dir.is_absolute():
+        txt_dir = Path.cwd() / txt_dir
+
+    if txt_dir.exists():
+        txt_files = list(txt_dir.glob("AS*.txt"))
+        return txt_dir, len(txt_files)
+
+    return txt_dir, 0
 
 def main():
     args = parse_args()
@@ -215,6 +289,91 @@ def load_cache(cache_file: Path) -> dict:
     except json.JSONDecodeError:
         logging.warning(f"Ошибка чтения кеша {cache_file}, создание нового.")
         return {}
+
+def clean_txt_directory(list_name: str, config: dict) -> bool:
+    """
+    Очищает директорию с TXT файлами перед генерацией новых.
+
+    Args:
+        list_name: Имя AddressList
+        config: Конфигурация
+
+    Returns:
+        bool: True если очистка выполнена, False если не требуется или ошибка
+    """
+    # Проверка включена ли генерация TXT файлов
+    if not config or not config.get('enable_gen_asn_txt', False):
+        return False
+
+    # Получает пользовательский путь из конфига
+    custom_paths = config.get('path_save_asn_txt', {})
+
+    if list_name not in custom_paths:
+        logging.debug(f"Для листа {list_name} не указан пользовательский путь в path_save_asn_txt - очистка не требуется")
+        return False
+
+    custom_path = Path(custom_paths[list_name])
+
+    if not custom_path.is_absolute():
+        custom_path = Path.cwd() / custom_path
+
+    # Проверяет существование директории
+    if not custom_path.exists():
+        logging.info(f"Директория {custom_path} не существует, очистка не требуется")
+        return False
+
+    # Поиск всех AS*.txt файлов
+    txt_files = list(custom_path.glob("AS*.txt"))
+
+    if not txt_files:
+        logging.info(f"В директории {custom_path} нет TXT файлов для очистки")
+        return False
+
+    # Удаляет файлы
+    deleted_count = 0
+    for file_path in txt_files:
+        try:
+            file_path.unlink()
+            deleted_count += 1
+            logging.debug(f"Удалён файл: {file_path}")
+        except Exception as e:
+            logging.warning(f"Ошибка удаления {file_path}: {e}")
+
+    logging.info(f"🗑️ Очищена директория {custom_path}: удалено {deleted_count} TXT файлов")
+    return True
+
+
+def has_filters_in_as_list(raw_as_list: list) -> bool:
+    """
+    Проверяет, есть ли в списке AS фильтры (маркеры).
+
+    Args:
+        raw_as_list: Исходный список из as_list.json5
+
+    Returns:
+        bool: True если есть хотя бы один маркер фильтрации
+    """
+    if not raw_as_list:
+        return False
+
+    for item in raw_as_list:
+        if not isinstance(item, str):
+            continue
+
+        item = item.strip()
+
+        # Проверка наличия любых маркеров:
+        # - __ALL_AS__ (все AS)
+        # - !AS* (исключение AS)
+        # - !CC_* (исключение страны)
+        # - CC_* (включение страны)
+        if (item == "__ALL_AS__" or
+            item.startswith("!AS") or
+            item.startswith("!CC_") or
+            item.startswith("CC_")):
+            return True
+
+    return False
 
 def save_cache(cache_file: Path, data: dict):
     """Сохраняет данные в кеш-файл"""
@@ -533,6 +692,18 @@ def process_list(list_name, config):
 
 def process_api_mode(list_name, unique_as, paths, config):
     """Обработка через API (существующая логика)"""
+
+    try:
+        json5_path = paths["as_list"].with_suffix('.json5')
+        with open(json5_path, 'r', encoding='utf-8') as f:
+            raw_as_list = json5.load(f)
+
+        if has_filters_in_as_list(raw_as_list):
+            logging.info("Обнаружены фильтры в as_list.json5 - будет выполнена очистка директории TXT файлов")
+            clean_txt_directory(list_name, config)
+    except Exception as e:
+        logging.warning(f"Не удалось проверить наличие фильтров: {e}")
+
     results = {
         "metadata": {
             "generated_at": datetime.now().isoformat(),
@@ -615,7 +786,16 @@ def process_api_mode(list_name, unique_as, paths, config):
         used_sources.update(asn_data.get("sources", []))
     results["metadata"]["sources_used"] = list(used_sources)
 
+    # Подсчёт TXT файлов (если включен enable_gen_asn_txt)
+    txt_dir, txt_count = count_txt_files(paths["output"], list_name, config)
+
+    # Сохраняем результаты
     save_results(list_name, results, config)
+
+    # Вывод информации о TXT файлах
+    if txt_count > 0:
+        logging.info(f"📁 TXT файлы сохранены: {txt_dir}")
+        logging.info(f"📄 Количество файлов: {txt_count}")
 
     logging.info("\n=== Статистика обработки ===")
     logging.info(f"Всего AS: {stats['total']}")
@@ -635,6 +815,10 @@ def process_file_mode(list_name, raw_as_list, paths, config):
         config: Конфигурация
     """
     logging.info(f"Режим file: чтение данных для {list_name}")
+
+    if has_filters_in_as_list(raw_as_list):
+        logging.info("Обнаружены фильтры в as_list.json5 - будет выполнена очистка директории TXT файлов")
+        clean_txt_directory(list_name, config)
 
     # Получает путь к директории с файлами из конфига
     storage_path = config.get('storage_raw_data', {}).get('path_external_data')
@@ -731,8 +915,16 @@ def process_file_mode(list_name, raw_as_list, paths, config):
 
         stats['failed'] = len(filtered_as_list) - len(results["as_data"])
 
+        # Подсчёт TXT файлов (если включен - enable_gen_asn_txt)
+        txt_dir, txt_count = count_txt_files(paths["output"], list_name, config)
+
         # Сохраняет общий результат
         save_results(list_name, results, config)
+
+        # Вывод информации о TXT файлах
+        if txt_count > 0:
+            logging.info(f"📁 TXT файлы сохранены: {txt_dir}")
+            logging.info(f"📄 Количество файлов: {txt_count}")
 
         # Логирует статистику с деталями по маркерам
         logging.info("\n=== Статистика обработки (file mode) ===")
