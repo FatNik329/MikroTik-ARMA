@@ -36,6 +36,26 @@ def save_yaml_file(data, file_path):
         _logger.error(f"Ошибка при сохранении файла {file_path}: {e}")
         raise
 
+def save_yaml_file_atomic(data, file_path):
+    """Атомарное сохранение данных в YAML файл с использованием временного файла"""
+    temp_file_path = Path(file_path).parent / f".{Path(file_path).name}.tmp"
+
+    try:
+        # Сохраняет во временный файл
+        with open(temp_file_path, 'w', encoding='utf-8') as file:
+            yaml.dump(data, file, allow_unicode=True, sort_keys=False)
+
+        # Если сохранение успешно, заменяет оригинальный файл
+        Path(temp_file_path).replace(file_path)
+        _logger.info(f"Файл успешно сохранен: {file_path}")
+
+    except Exception as e:
+        # При ошибке удаляет временный файл если он существует
+        if Path(temp_file_path).exists():
+            Path(temp_file_path).unlink()
+        _logger.error(f"Ошибка при атомарном сохранении файла {file_path}: {e}")
+        raise
+
 def load_existing_output_file(file_path):
     """Загрузка существующего выходного файла"""
     try:
@@ -80,9 +100,13 @@ def merge_categories(existing_categories, new_categories):
 def process_dns_data(input_data, existing_output_data=None):
     """Обработка DNS данных и создание/обновление фильтрованной структуры"""
     try:
+        # Проверка входных данных
+        if not input_data:
+            raise ValueError("Входные данные пусты или некорректны")
+
         current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-        if existing_output_data:
+        if existing_output_data and isinstance(existing_output_data, dict):
             # Основные данные
             output_data = existing_output_data.copy()
             output_data['meta']['last_updated'] = current_time
@@ -102,17 +126,22 @@ def process_dns_data(input_data, existing_output_data=None):
                 'categories': {}
             }
 
-        if 'meta' in input_data:
+        if 'meta' in input_data and isinstance(input_data['meta'], dict):
             dns_meta_to_preserve = ['dns_servers', 'timeout']
             for key in dns_meta_to_preserve:
                 if key in input_data['meta']:
                     output_data['meta'][key] = input_data['meta'][key]
 
-        if 'categories' in input_data:
+        if 'categories' in input_data and isinstance(input_data['categories'], dict):
             new_categories = {}
             for category, domains in input_data['categories'].items():
-                domain_list = sorted(list(domains.keys()))
-                new_categories[category] = domain_list
+                if domains and isinstance(domains, dict):
+                    domain_list = sorted(list(domains.keys()))
+                    new_categories[category] = domain_list
+                elif domains and isinstance(domains, list):
+                    new_categories[category] = sorted(domains)
+                else:
+                    new_categories[category] = []
 
             merged_categories, total_added = merge_categories(
                 output_data.get('categories', {}),
@@ -155,6 +184,11 @@ def create_catsort_file(output_data, output_file_path):
             domain_tree = {}
 
             for domain in domains:
+                # Проверка на None и пустые значения
+                if domain is None or not isinstance(domain, str):
+                    _logger.warning(f"Пропущен некорректный домен: {domain}")
+                    continue
+
                 parts = domain.split('.')
                 if len(parts) >= 2:
                     l2_domain = '.'.join(parts[-2:])
@@ -181,9 +215,9 @@ def create_catsort_file(output_data, output_file_path):
         # Обновление статистики
         catsort_data['meta']['statistics']['total_domains_l2'] = total_l2_domains
 
-        # Сохранение файла
+        # Сохранение файла - атомарное
         catsort_path = output_file_path.parent / f"{output_file_path.stem}-catsort.yaml"
-        save_yaml_file(catsort_data, catsort_path)
+        save_yaml_file_atomic(catsort_data, catsort_path)
         _logger.info(f"Создан файл категоризации: {catsort_path}")
 
         return True
@@ -239,9 +273,9 @@ class FilterResultsDnsCore:
             _logger.info("Обработка DNS данных...")
             output_data = process_dns_data(input_data, existing_output_data)
 
-            # Сохранение результата
+            # Сохранение результата - атомарное
             _logger.info("Сохранение результата...")
-            save_yaml_file(output_data, output_path)
+            save_yaml_file_atomic(output_data, output_path)
 
             # Создание catsort файла если включено
             if DOMAINS_CATSORT.lower() == "true":
@@ -255,6 +289,6 @@ class FilterResultsDnsCore:
             _logger.info(f"Выполнение успешно! Всего в файле: категории - {stats['total_categories']}, домены - {stats['total_domains']}")
 
         except Exception as e:
-            logger.error(f"Критическая ошибка: {e}")
+            _logger.error(f"Критическая ошибка: {e}")
             return False
         return True
