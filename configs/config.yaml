@@ -74,7 +74,7 @@ main_start:
       - "ошибка от API"
       - "tld_parser завершил работу с ошибками"
       - "ASN MMDB файл не найден"
-      - "Ошибка скачивания MMDB - IPLocate"
+      - "Ошибка скачивания MMDB"
       - "Проверка структуры не пройдена"
       - "Ошибка разбора YAML файла"
       - "Ошибка парсинга JSON"
@@ -213,11 +213,15 @@ converter_add_list:
     log_level: "INFO"         ## Уровень детализации логов: DEBUG, INFO, WARNING, ERROR, CRITICAL
 
   list_name: ["Example Lists1", "..."]  ## Обработка конкретных Address Lists
-
+  path_to_public_suffix: "raw-data/path/to/public_suffix_list.dat" ## none - не указывать файл (используются заложенные значения из скрипта). Путь до Public Suffix (используется при генерации DNS Forwarders)
+  
   settings_gen:                # Настройки генерации файлов *.rsc
     skip_domains: false        ## Пропустить генерацию файлов с доменами (true/false)
     skip_ips: false            ## Пропустить генерацию файлов с IP на основе доменных имён (true/false)
     skip_asn: false            ## Пропустить генерацию файлов с AS префиксами (true/false)
+    skip_dnsFWD: false        # Пропустить генерацию файлов с DNS Forwarders (true/false)
+    max_private_components: 2    ### Ограничить количество компонентов до основного суффикса (только для PRIVATE) - при генерации DNS Forwarders файлов
+    merge_private_suffixes: true ### Включить объединение для PRIVATE суффиксов (true/false) - при генерации DNS Forwarders файлов
 
   cache_sett:                  # Настройки кэша
     ttl: 7                     ## Время актуальности кэша (дни) = 7 дней
