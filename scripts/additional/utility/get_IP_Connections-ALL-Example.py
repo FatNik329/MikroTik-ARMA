@@ -5,11 +5,14 @@ import ipaddress
 import json
 import yaml
 import sys
+import tempfile
+import shutil
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Set, Optional, Dict, Any
 from routeros_api import RouterOsApiPool
 from routeros_api.exceptions import RouterOsApiConnectionError, RouterOsApiCommunicationError
+
 
 # ===== КОНФИГУРАЦИЯ СКРИПТА =====
 # Параметры по умолчанию
@@ -18,6 +21,8 @@ DEFAULT_PASSWORD = 'PasswordUsername'
 API_PORT = 8728                  # API port (8728)
 API_SSL_PORT = 8729              # API-SSL port (8729)
 SSL = True   # Use SSL (True/False)
+
+CLEANUP_DAYS = 180  # Удалять записи, которые не появлялись более N дней (last_seen)
 
 # Индивидуальные учетные данные и параметры для конкретных устройств
 # Формат: "IP": ("username", "password", SSL, API порт)
@@ -475,32 +480,52 @@ def generate_filename(host: str, src_address: str, dst_address: str, conn_mark: 
     return filename
 
 def save_results(addresses: Set[str], output_dir: str, filename: str):
-    """Сохраняет результаты в JSON файл с временными метками."""
+    """Сохраняет результаты в JSON файл с атомарной записью."""
     try:
         os.makedirs(output_dir, exist_ok=True)
         filepath = os.path.join(output_dir, filename.replace('.txt', '.json'))
 
-        # Загрузка существующих данные
+
+        existing_data = None
         if os.path.exists(filepath):
             try:
-                with open(filepath, 'r', encoding='utf-8') as f:
-                    existing_data = json.load(f)
+                # Проверка размера файла
+                file_size = os.path.getsize(filepath)
+                if file_size == 0:
+                    logging.warning(f"Файл {filepath} пустой. Будет создан новый.")
+                    existing_data = None
+                else:
+                    with open(filepath, 'r', encoding='utf-8') as f:
+                        existing_data = json.load(f)
+            except json.JSONDecodeError as e:
+                logging.error(f"JSON файл поврежден: {e}. Создание бэкапа и нового файла.")
+                # Создает бэкап поврежденного файла
+                backup_path = filepath + f".corrupted.{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                shutil.copy2(filepath, backup_path)
+                logging.info(f"Поврежденный файл сохранен как {backup_path}")
+                existing_data = None
             except Exception as e:
-                logging.warning(f"Ошибка при чтении JSON файла: {e}")
-                existing_data = create_new_data_structure()
+                logging.error(f"Ошибка при чтении JSON файла: {e}")
+                existing_data = None
         else:
+            existing_data = None
+
+        # Создание новых структур
+        if existing_data is None:
             existing_data = create_new_data_structure()
+
+        # Очистка устаревших записей
+        if CLEANUP_DAYS > 0:
+            existing_data = cleanup_old_addresses(existing_data, CLEANUP_DAYS)
 
         current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
         # Обновление адресов
         for addr in addresses:
             if addr in existing_data['addresses']:
-                # Обновление существующего адрес
                 existing_data['addresses'][addr]['last_seen'] = current_time
                 existing_data['addresses'][addr]['seen_count'] += 1
             else:
-                # Добавление нового адреса
                 existing_data['addresses'][addr] = {
                     'first_seen': current_time,
                     'last_seen': current_time,
@@ -511,11 +536,31 @@ def save_results(addresses: Set[str], output_dir: str, filename: str):
         existing_data['metadata']['last_updated'] = current_time
         existing_data['metadata']['total_addresses'] = len(existing_data['addresses'])
 
-        # Сохранение обновленных данных
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(existing_data, f, indent=2, ensure_ascii=False)
+        # Атомарная запись данных
+        temp_fd, temp_path = tempfile.mkstemp(
+            dir=output_dir,
+            prefix='.tmp_',
+            suffix='.json'
+        )
 
-        logging.info(f"Результаты сохранены в {filepath} (обработано {len(addresses)} адресов)")
+        try:
+            with os.fdopen(temp_fd, 'w', encoding='utf-8') as f:
+                json.dump(existing_data, f, indent=2, ensure_ascii=False)
+                f.flush()
+                os.fsync(temp_fd)
+
+            # Атомарное переименование (заменяет существующий файл)
+            os.replace(temp_path, filepath)
+
+            logging.info(f"Результаты сохранены в {filepath} (обработано {len(addresses)} адресов, всего записей: {len(existing_data['addresses'])})")
+
+        except Exception as e:
+
+            try:
+                os.unlink(temp_path)
+            except:
+                pass
+            raise e
 
     except Exception as e:
         logging.error(f"Ошибка при сохранении результатов: {e}", exc_info=True)
@@ -536,19 +581,60 @@ def create_new_data_structure() -> Dict[str, Any]:
                 "conn_mark": CONN_MARK,
                 "asn_filter": ASN_FILTER,
                 "dns_filter": DNS_FILTER
-            }
+            },
+            "cleanup_days": CLEANUP_DAYS
         },
         "addresses": {}
     }
+
+def cleanup_old_addresses(data: Dict[str, Any], days: int) -> Dict[str, Any]:
+    """Удаляет записи, которые не обновлялись более N дней (last_seen)."""
+    if days <= 0:
+        logging.info("Очистка устаревших записей отключена (CLEANUP_DAYS <= 0)")
+        return data
+
+    try:
+        current_time = datetime.now()
+        cutoff_time = current_time - timedelta(days=days)
+
+        addresses_to_remove = []
+
+        for addr, info in data['addresses'].items():
+            try:
+                last_seen = datetime.strptime(info['last_seen'], '%Y-%m-%d %H:%M:%S')
+                if last_seen < cutoff_time:
+                    addresses_to_remove.append(addr)
+            except ValueError as e:
+                logging.warning(f"Не удалось распарсить дату для адреса {addr}: {e}")
+                continue
+
+        # Удаляет устаревшие записи
+        for addr in addresses_to_remove:
+            del data['addresses'][addr]
+
+        if addresses_to_remove:
+            logging.info(f"Удалено {len(addresses_to_remove)} устаревших записей (неактивны > {days} дней)")
+            logging.debug(f"Удаленные адреса: {addresses_to_remove[:10]}{'...' if len(addresses_to_remove) > 10 else ''}")
+        else:
+            logging.info(f"Устаревших записей не найдено (порог: {days} дней)")
+
+        # Обновляет общее количество
+        data['metadata']['total_addresses'] = len(data['addresses'])
+
+        return data
+
+    except Exception as e:
+        logging.error(f"Ошибка при очистке устаревших записей: {e}", exc_info=True)
+        return data
 
 def process_single_device(device_ip: str) -> bool:
     """Обрабатывает одно устройство."""
     logging.info(f"\n--- Обработка устройства {device_ip} ---")
 
-    # Получаем учетные данные для устройства
+    # Получение учетных данных для устройства
     username, password, ssl_flag, port = get_device_credentials(device_ip)
 
-    # Подключаемся к устройству
+    # Подключение к устройству
     pool = connect_to_mikrotik(device_ip, username, password, port, ssl_flag)
 
     if not pool:
