@@ -33,6 +33,7 @@ RouterOS-api==0.21.0
 setuptools==80.9.0
 toml==0.10.2
 ujson==5.11.0
+Unidecode==1.4.0
 urllib3==2.6.3
 wheel==0.45.1
 yarl==1.22.0
