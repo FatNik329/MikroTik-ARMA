@@ -10,7 +10,7 @@ import ssl
 import yaml
 
 # Режимы синхронизации
-VALID_MODES = ["domains", "ips", "asn", "dom-asn", "ips-asn"]
+VALID_MODES = ["domains", "ips", "asn", "dom-asn", "ips-asn", "dns-fwd"]
 
 # Маппинг режимов и обрабатываемых файлов
 MODE_FILE_PATTERNS = {
@@ -33,13 +33,17 @@ MODE_FILE_PATTERNS = {
     "asn": {
         "ipv4": ["AS/*-ipv4.rsc"],
         "ipv6": ["AS/*-ipv6.rsc"]
+    },
+    "dns-fwd": {
+        "ipv4": ["DNS/*-dnsForward.rsc"],
+        "ipv6": []
     }
 }
 
 def parse_args():
     """Парсинг аргументов командной строки (опциональные)"""
     parser = argparse.ArgumentParser(description='Синхронизация Address Lists MikroTik')
-    valid_modes = ["domains", "ips", "asn", "dom-asn", "ips-asn"]
+    valid_modes = ["domains", "ips", "asn", "dom-asn", "ips-asn", "dns-fwd"]
     parser.add_argument("--mode-run",
                        choices=valid_modes,
                        help=f"Режим работы ({'/'.join(valid_modes)})")
@@ -90,7 +94,7 @@ def validate_config(config):
         raise ValueError("ОШИБКА: В конфигурации отключены и IPv4, и IPv6. Включите хотя бы один.")
 
     # Список допустимых режимов
-    valid_modes = ["domains", "ips", "asn", "dom-asn", "ips-asn"]
+    valid_modes = ["domains", "ips", "asn", "dom-asn", "ips-asn", "dns-fwd"]
     current_mode = sync_cfg.get("mode")
 
     if current_mode not in valid_modes:
@@ -151,6 +155,23 @@ def check_ipv6_support(api):
         return not ipv6_package[0].get('disabled', 'true') == 'true'
     except Exception as e:
         logging.warning(f"Ошибка проверки пакета IPv6: {e}. Предполагаем, что IPv6 отключен")
+        return False
+
+def check_routeros_version(api):
+    """Проверяет версию RouterOS (поддержка DNS FWD доступна с версии 7)"""
+    try:
+        resource = api.get_resource('/system/resource')
+        system_info = resource.get()
+        if system_info:
+            version = system_info[0].get('version', '')
+            if version.startswith('7.'):
+                return True
+            else:
+                logging.warning(f"RouterOS версии {version} не поддерживает DNS FWD (требуется версия 7+)")
+                return False
+        return False
+    except Exception as e:
+        logging.warning(f"Ошибка проверки версии RouterOS: {e}. Предположительно DNS FWD не поддерживается")
         return False
 
 def get_rsc_files(list_name, mode, config=None, ipv6_supported=False):
@@ -239,11 +260,9 @@ def parse_rsc_file(file_path, config):
                     parts = line.strip().split('comment=')
                     comment = parts[1].strip('"') if len(parts) > 1 else ""
 
-                    # Для DNS и Custom файлов оставляем комментарии полностью как есть
                     if is_dns_file or is_custom_file:
                         pass
                     else:
-                        # Для остальных файлов убираем дублирование если есть "->"
                         if comment and "->" in comment:
                             comment = comment.split("->")[-1].strip()
 
@@ -260,7 +279,6 @@ def parse_rsc_file(file_path, config):
                     if is_ipv6 and not is_domains_file:
                         address = address.replace('/128', '')
 
-                    # Сохранение типа записи для дальнейшей обработки
                     entry_type = 'ipv6-domain' if (is_domains_file and is_ipv6) else ('ipv6' if is_ipv6 else 'ipv4')
                     entries[address] = {
                         'comment': comment,
@@ -315,6 +333,206 @@ def get_current_static_entries(api, list_name, ipv6_supported=True):
             logging.warning(f"Ошибка получения IPv6 записей: {e}. Продолжаем без IPv6")
 
     return entries
+
+def get_current_dns_entries(api, list_name):
+    """Получение текущих DNS статических записей с устройства MikroTik (только type=FWD для конкретного address-list)"""
+    entries = {}
+    try:
+        dns_resource = api.get_resource('/ip/dns/static')
+        items = dns_resource.get()
+        for item in items:
+            if (item.get('type') == 'FWD' and
+                'id' in item and
+                'name' in item and
+                item.get('address-list') == list_name):
+                key = item['name'].strip()
+                entries[key] = {
+                    'id': item['id'],
+                    'name': item.get('name', '').strip(),
+                    'type': 'FWD',
+                    'address': item.get('address', '').strip(),
+                    'forward_to': item.get('forward-to', '').strip(),
+                    'match_subdomain': 'yes' if str(item.get('match-subdomain', 'no')).lower() in ['yes', 'true', '1'] else 'no',
+                    'address_list': item.get('address-list', '').strip(),
+                    'comment': item.get('comment', '').strip(),
+                    'ttl': item.get('ttl', ''),
+                    'regexp': item.get('regexp', '')
+                }
+    except Exception as e:
+        logging.error(f"Ошибка получения DNS статических записей: {e}")
+        return None
+    return entries
+
+def parse_dns_fwd_file(file_path, list_name, config):
+    """Парсинг DNS FWD файла с проверкой address-list и нормализацией"""
+    entries = {}
+    try:
+        with open(file_path, 'r') as f:
+            for line in f:
+                if line.startswith("add") and "type=FWD" in line:
+                    # Парсинг строки вручную
+                    entry = {}
+                    entry['address_list'] = list_name  # Брать list_name из параметра
+
+
+                    if 'name=' in line:
+                        name_part = line.split('name=')[1].split()[0].strip('"')
+                        entry['name'] = name_part.strip()
+
+
+                    if 'type=' in line:
+                        type_part = line.split('type=')[1].split()[0].strip('"')
+                        if type_part.upper() != 'FWD':
+                            logging.debug(f"Пропускаем запись не типа FWD: {line.strip()}")
+                            continue
+                        entry['type'] = 'FWD'  # Нормализует в верхний регистр
+
+
+                    if 'forward-to=' in line:
+                        forward_part = line.split('forward-to=')[1].split()[0].strip('"')
+                        entry['forward_to'] = forward_part.strip()
+
+
+                    if 'match-subdomain=' in line:
+                        match_part = line.split('match-subdomain=')[1].split()[0].strip('"')
+                        if match_part.lower() in ['yes', 'true', '1']:
+                            entry['match_subdomain'] = 'yes'
+                        else:
+                            entry['match_subdomain'] = 'no'
+                    else:
+                        # По умолчанию no, если не указано
+                        entry['match_subdomain'] = 'no'
+
+                    # Извлекает address-list из файла (если есть)
+                    if 'address-list=' in line:
+                        file_list_part = line.split('address-list=')[1].split()[0].strip('"')
+                        if file_list_part != list_name:
+                            logging.warning(f"Address-list в файле ({file_list_part}) не совпадает с ожидаемым ({list_name})")
+                            entry['address_list'] = file_list_part.strip()
+
+                    # Извлекает comment
+                    if 'comment=' in line:
+                        comment_part = line.split('comment=')[1].split()[0].strip('"')
+                        entry['comment'] = comment_part.strip()
+                    else:
+                        entry['comment'] = ''
+
+                    # Проверка обязательных путей
+                    if 'name' in entry and 'forward_to' in entry and 'type' in entry:
+                        entries[entry['name']] = entry
+                    else:
+                        logging.warning(f"Пропускаем некорректную запись в {file_path.name}: {line.strip()}")
+    except Exception as e:
+        logging.error(f"Ошибка чтения {file_path}: {e}")
+    return entries
+
+def normalize_dns_entry(entry):
+    """Нормализация DNS записи для корректного сравнения"""
+    normalized = {}
+
+    for key, value in entry.items():
+        if isinstance(value, str):
+            normalized[key] = value.strip()
+        else:
+            normalized[key] = value
+
+    if 'match_subdomain' in normalized:
+        if normalized['match_subdomain'] in ['yes', 'true', True]:
+            normalized['match_subdomain'] = 'yes'
+        else:
+            normalized['match_subdomain'] = 'no'
+
+    # type = FWD (верхний регистр)
+    if 'type' in normalized:
+        normalized['type'] = normalized['type'].upper()
+
+    if 'address_list' in normalized:
+        normalized['address_list'] = normalized['address_list'].strip()
+
+    # Удаляет поля, не влияющие на сравнение
+    normalized.pop('id', None)
+    normalized.pop('ttl', None)
+    normalized.pop('regexp', None)
+
+    return normalized
+
+def compare_dns_entries(entry1, entry2):
+    """Сравнение DNS записей с нормализацией"""
+    norm1 = normalize_dns_entry(entry1)
+    norm2 = normalize_dns_entry(entry2)
+
+    # Сравнивает только ключевые поля
+    key_fields = ['name', 'type', 'forward_to', 'match_subdomain', 'address_list', 'comment']
+
+    for field in key_fields:
+        if norm1.get(field) != norm2.get(field):
+            logging.debug(f"Различие в поле '{field}': '{norm1.get(field)}' vs '{norm2.get(field)}'")
+            return False
+
+    return True
+
+def process_dns_batch(api, list_name, batch, operation, delay):
+    """Пакетная обработка DNS FWD записей через API"""
+    stats = {'processed': 0, 'errors': 0, 'skipped': 0}
+
+    if not batch:
+        return stats
+
+    dns_resource = api.get_resource('/ip/dns/static')
+
+    try:
+        if operation == 'add':
+            # Массовое добавление DNS FWD
+            for item in batch:
+                params = {
+                    'name': item['name'],
+                    'type': item['type'],
+                    'forward-to': item['forward_to'],
+                    'match-subdomain': item.get('match_subdomain', 'no'),
+                    'address-list': item.get('address_list', list_name),
+                    'comment': item.get('comment', '')
+                }
+                if item.get('ttl'):
+                    params['ttl'] = item['ttl']
+                if item.get('regexp'):
+                    params['regexp'] = item['regexp']
+
+                dns_resource.add(**params)
+                stats['processed'] += 1
+                time.sleep(delay)
+
+        elif operation == 'remove':
+            # Массовое удаление DNS FWD
+            for item in batch:
+                dns_resource.remove(id=item['id'])
+                stats['processed'] += 1
+                time.sleep(delay)
+
+        elif operation == 'update':
+            # Массовое обновление DNS FWD
+            for item in batch:
+                params = {
+                    'name': item['name'],
+                    'type': item['type'],
+                    'forward-to': item['forward_to'],
+                    'match-subdomain': item.get('match_subdomain', 'no'),
+                    'address-list': item.get('address_list', list_name),
+                    'comment': item.get('comment', '')
+                }
+                if item.get('ttl'):
+                    params['ttl'] = item['ttl']
+                if item.get('regexp'):
+                    params['regexp'] = item['regexp']
+
+                dns_resource.set(id=item['id'], **params)
+                stats['processed'] += 1
+                time.sleep(delay * 2)
+
+    except Exception as e:
+        stats['errors'] += len(batch)
+        logging.error(f"Пакетная ошибка {operation} (DNS FWD) для '{list_name}': {str(e)}")
+
+    return stats
 
 def check_existing_entries_batch(api, list_name, addresses, ipv6=False):
     """Массовая проверка существующих записей"""
@@ -443,6 +661,113 @@ def sync_list(api, list_name, mode, config, device_config, args):
     ipv6_supported = ipv6_enabled and check_ipv6_support(api)
 
     rsc_files = get_rsc_files(list_name, mode, config, ipv6_supported)
+
+    # Обработка для режима dns-fwd
+    if mode == "dns-fwd":
+        # Проверка версии RouterOS (требуется 7+)
+        if not check_routeros_version(api):
+            logging.error(f"Устройство {device_config['name']} не поддерживает DNS FWD (требуется RouterOS 7+)")
+            return False
+
+        # Получает текущие DNS записи конкретного address-list
+        current_entries = get_current_dns_entries(api, list_name)
+        if current_entries is None:
+            return False
+
+        # Загружает целевые записи из файлов
+        target_entries = {}
+        for file in rsc_files:
+            file_entries = parse_dns_fwd_file(file, list_name, config)
+            if file_entries:
+                target_entries.update(file_entries)
+                logging.debug(f"Загружено {len(file_entries)} DNS FWD записей из {file.name}")
+
+        if not target_entries:
+            # Если нет целевых записей, но есть текущие - удалить
+            if current_entries:
+                logging.info(f"Нет целевых записей для address-list '{list_name}', будут удалены все существующие FWD записи для этого списка")
+            else:
+                logging.info(f"Нет данных для синхронизации DNS FWD для address-list '{list_name}'")
+                return True
+
+        to_add = []
+        to_update = []
+        to_remove = []
+
+        # Проверка на удаление и обновление
+        for name, data in target_entries.items():
+            if name not in current_entries:
+                to_add.append(data)
+            else:
+                # Используем функцию сравнения с нормализацией
+                if not compare_dns_entries(current_entries[name], data):
+                    data['id'] = current_entries[name]['id']
+                    to_update.append(data)
+                    logging.debug(f"Запись '{name}' будет обновлена (есть различия)")
+                else:
+                    logging.debug(f"Запись '{name}' актуальна, пропускаем")
+
+        for name in set(current_entries) - set(target_entries):
+            # Удалять только в конкретно Address List
+            if current_entries[name].get('address_list') == list_name:
+                to_remove.append({'id': current_entries[name]['id']})
+            else:
+                logging.debug(f"Пропускаем удаление записи {name} (address-list: {current_entries[name].get('address_list')}) - не соответствует {list_name}")
+
+        # Проверка актуальности
+        is_up_to_date = not to_add and not to_update and not to_remove
+
+        logging.info(
+            f"Устройство {device_config['name']}, режим DNS FWD для '{list_name}': "
+            f"текущих: {len(current_entries)}, целевых: {len(target_entries)}. "
+            f"Состояние: {'актуально' if is_up_to_date else 'неактуально'}"
+        )
+
+        if is_up_to_date:
+            return True
+
+        # Dry-run режим
+        if args.dry_run:
+            logging.info(f"DRY RUN: Устройство {device_config['name']} требует обновления DNS FWD для '{list_name}'")
+            logging.info(f"  Добавить: {len(to_add)}, Обновить: {len(to_update)}, Удалить: {len(to_remove)}")
+            return True
+
+        # Применяет изменения
+        stats = {'added': 0, 'removed': 0, 'updated': 0, 'errors': 0}
+        settings = device_config.get('settings', {})
+        delay = settings.get('update_delay', config["sync_master"]["setting_sync"]["update_delay"])
+        batch_size = settings.get('batch_size', config["sync_master"]["setting_sync"].get("batch_size", 1500))
+
+        # Удаление
+        if to_remove:
+            result = process_dns_batch(api, list_name, to_remove, 'remove', delay)
+            stats['removed'] += result['processed']
+            stats['errors'] += result['errors']
+
+        # Обновление
+        if to_update:
+            for i in range(0, len(to_update), batch_size):
+                result = process_dns_batch(api, list_name, to_update[i:i + batch_size], 'update', delay)
+                stats['updated'] += result['processed']
+                stats['errors'] += result['errors']
+
+        # Добавление
+        if to_add:
+            for i in range(0, len(to_add), batch_size):
+                result = process_dns_batch(api, list_name, to_add[i:i + batch_size], 'add', delay)
+                stats['added'] += result['processed']
+                stats['errors'] += result['errors']
+
+        logging.info(
+            f"Устройство {device_config['name']} DNS FWD для '{list_name}' обновлено: "
+            f"добавлено {stats['added']}, обновлено {stats['updated']}, "
+            f"удалено {stats['removed']}, ошибок: {stats['errors']}"
+        )
+
+        sync_duration = time.time() - sync_start_time
+        logging.info(f"Синхронизация DNS FWD для списка {list_name} заняла {sync_duration:.2f} секунд")
+        return stats['errors'] == 0
+
     if not rsc_files:
         return False
 
@@ -453,7 +778,7 @@ def sync_list(api, list_name, mode, config, device_config, args):
         if file_entries:
             target_entries.update(file_entries)
             logging.debug(f"Загружено {len(file_entries)} записей из {file.name}")
-            # Логируем первые 3 записи с их типами для проверки
+            # Логирование первых 3 записей с их типами для проверки
             for addr, data in list(file_entries.items())[:3]:
                 logging.debug(f"  Пример записи: {addr} (тип: {data['type']}) -> {data['comment']}")
 
@@ -484,7 +809,7 @@ def sync_list(api, list_name, mode, config, device_config, args):
         elif data['type'] == 'ipv6-domain':
             target_domains_v6[addr] = data['comment']
 
-    # Объединяем IPv6 адреса и домены (если IPv6 включен)
+    # Объединяет IPv6 адреса и домены (если IPv6 включен)
     if ipv6_enabled:
         target_ipv6.update(target_domains_v6)
 
