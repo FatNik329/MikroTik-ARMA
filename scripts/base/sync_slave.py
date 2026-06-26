@@ -152,6 +152,46 @@ class AddressListManager:
         disabled = str(item.get('disabled', 'no')).lower() in ['yes', 'true']
         return not dynamic and not disabled
 
+class DNSStaticManager:
+    """Менеджер для работы с DNS статическими записями"""
+
+    @staticmethod
+    def get_dns_fwd_set(api) -> Set[Tuple[str, str, str, str]]:
+        """Получение множества DNS FWD записей с комментариями"""
+        result = set()
+
+        try:
+            resource = api.get_resource('/ip/dns/static')
+            items = resource.get()
+
+            for item in items:
+                # Проверка только записей type=FWD
+                if item.get('type') == 'FWD':
+                    name = str(item.get('name', ''))
+                    forward_to = str(item.get('forward-to', ''))
+                    address_list = str(item.get('address-list', ''))
+                    comment = str(item.get('comment', ''))
+                    # Комбинация name и forward-to как уникальный ключ
+                    result.add((name, forward_to, address_list, comment))
+        except Exception as e:
+            logging.debug(f"Ошибка получения DNS FWD записей: {str(e)}")
+
+        return result
+
+    @staticmethod
+    def check_routeros_version(api) -> bool:
+        """Проверка версии RouterOS (должна быть 7.x)"""
+        try:
+            resource = api.get_resource('/system/resource')
+            items = resource.get()
+
+            if items:
+                version = items[0].get('version', '')
+                return version.startswith('7.')
+        except Exception as e:
+            logging.debug(f"Ошибка проверки версии RouterOS: {str(e)}")
+            return False
+
 class SyncOperationsCalculator:
     """Калькулятор операций синхронизации"""
 
@@ -223,7 +263,7 @@ class MikroTikSyncer:
             slave_settings.setdefault('setting_sync', {})
 
             # Применение приоритетов - параметры из mikrotik.yaml переопределяют config.yaml
-            # Объединяем настройки с приоритетом для mikrotik.yaml
+            # Объединяет настройки с приоритетом для mikrotik.yaml
             for key in ['batch_size', 'update_delay', 'timeout']:
                 if key in mikrotik_config:
                     if key == 'batch_size':
@@ -308,7 +348,13 @@ class MikroTikSyncer:
             lists_to_sync = set(slave['list_sync'])
             self.logger.debug(f"Начинаем синхронизацию списков: {lists_to_sync}")
             result = self._sync_address_lists(slave_api, master_data, lists_to_sync, ipv6_supported, slave_name)
-            self.logger.debug(f"Синхронизация списков завершена, результат: {result}")
+
+
+            if result:
+                dns_result = self._sync_dns_fwd_records(slave_api, master_data, lists_to_sync, slave_name)
+                result = result and dns_result
+
+            self.logger.debug(f"Синхронизация завершена, результат: {result}")
             return result
 
         # Обработка ошибок авторизации Slave
@@ -341,15 +387,15 @@ class MikroTikSyncer:
         synced_lists = []
 
         def sync_single_list(list_name: str):
-            if list_name not in master_data:
+            if list_name not in master_data['address_lists']:
+                self.logger.warning(f"Список {list_name} отсутствует в данных master")
                 return False
-
 
             with self._connection_lock:
                 slave_set = AddressListManager.get_address_set(slave_api, list_name, ipv6_supported)
 
             operations = SyncOperationsCalculator.calculate_operations(
-                master_data[list_name], slave_set, ipv6_supported
+                master_data['address_lists'][list_name], slave_set, ipv6_supported
             )
 
             if any(operations.values()):
@@ -564,19 +610,30 @@ class MikroTikSyncer:
                 self.logger.info("Нет списков для синхронизации")
                 return None
 
-            master_data = {}
+            # Инициализируем структуру данных
+            master_data = {
+                'address_lists': {},  # для IPv4/IPv6 адресов
+                'dns_fwd': {}         # для DNS FWD записей
+            }
+
+            # Сбор address-list данных
             for list_name in lists_to_fetch:
                 address_set = AddressListManager.get_address_set(master_api, list_name, ipv6_supported)
                 if address_set:
-                    master_data[list_name] = address_set
+                    master_data['address_lists'][list_name] = address_set
                     stats['synced_lists'].add(list_name)
 
-                    # Логируем статистику по списку
                     ipv4_count = len([x for x in address_set if x[2] == 'ipv4'])
                     ipv6_count = len([x for x in address_set if x[2] == 'ipv6'])
                     self.logger.debug(f"Список {list_name}: {ipv4_count} IPv4 и {ipv6_count} IPv6 записей")
                 else:
                     stats['missing_lists'].add(list_name)
+
+                # Сбор DNS FWD записей конкретного list_name
+                dns_fwd_records = self._get_dns_fwd_for_list(master_api, list_name)
+                if dns_fwd_records:
+                    master_data['dns_fwd'][list_name] = dns_fwd_records
+                    self.logger.debug(f"DNS FWD для списка {list_name}: {len(dns_fwd_records)} записей")
 
             return master_data
 
@@ -600,6 +657,26 @@ class MikroTikSyncer:
             # Закрытие подключения
             if master_pool:
                 master_pool.disconnect()
+
+    def _get_dns_fwd_for_list(self, master_api, list_name: str) -> Set[Tuple[str, str, str, str]]:
+        """Получение DNS FWD записей с комментариями для указанного address-list"""
+        result = set()
+
+        try:
+            resource = master_api.get_resource('/ip/dns/static')
+            items = resource.get(address_list=list_name, type='FWD')
+
+            for item in items:
+                name = str(item.get('name', ''))
+                forward_to = str(item.get('forward-to', ''))
+                address_list = str(item.get('address-list', ''))
+                comment = str(item.get('comment', ''))
+                if name and forward_to:
+                    result.add((name, forward_to, address_list, comment))
+        except Exception as e:
+            self.logger.debug(f"Ошибка получения DNS FWD записей для списка {list_name}: {str(e)}")
+
+        return result
 
     def _get_sync_lists(self, slaves: List[Dict]) -> Set[str]:
         """Получение уникальных списков для синхронизации"""
@@ -661,6 +738,133 @@ class MikroTikSyncer:
         self.logger.info(f"\nОбщее количество ошибок при синхронизации: {self.error_counter}")
         self.logger.info(f"\nОбщее время выполнения: {time.time() - start_time:.2f} секунд")
         self.logger.info("==== Синхронизация завершена ====\n")
+
+    def _sync_dns_fwd_records(self, slave_api, master_data: Dict, lists_to_sync: Set[str], slave_name: str) -> bool:
+        """Синхронизация DNS FWD записей"""
+        # Проверка версии RouterOS
+        if not DNSStaticManager.check_routeros_version(slave_api):
+            self.logger.info(f"Устройство {slave_name} работает на RouterOS 6, синхронизация DNS FWD пропущена")
+            return True
+
+        self.logger.info(f"Устройство {slave_name} работает на RouterOS 7, выполняем синхронизацию DNS FWD")
+
+        master_fwd_records = set()
+        for list_name in lists_to_sync:
+            if list_name in master_data.get('dns_fwd', {}):
+                records = master_data['dns_fwd'][list_name]
+                master_fwd_records.update(records)
+                self.logger.debug(f"Найдено {len(records)} DNS FWD записей для списка {list_name}")
+
+        if not master_fwd_records:
+            self.logger.info(f"Нет DNS FWD записей для синхронизации на устройстве {slave_name}")
+            return True
+
+        # Получает текущие FWD записи на slave
+        slave_fwd_records = DNSStaticManager.get_dns_fwd_set(slave_api)
+
+        # Вычисляет операции синхронизации
+        operations = self._calculate_dns_operations(master_fwd_records, slave_fwd_records)
+
+        if any(operations.values()):
+            self._log_dns_operations(operations)
+            self._execute_dns_operations(slave_api, operations, slave_name)
+        else:
+            self.logger.info(f"[DNS FWD] Данные актуальны на устройстве {slave_name}")
+
+        return True
+
+    def _calculate_dns_operations(self, master_set: Set[Tuple], slave_set: Set[Tuple]) -> Dict[str, Set]:
+        """Вычисляет операции для синхронизации DNS записей с учетом комментариев"""
+        # Словарь для быстрого поиска
+        master_dict = {(name, forward_to): (address_list, comment) for name, forward_to, address_list, comment in master_set}
+        slave_dict = {(name, forward_to): (address_list, comment) for name, forward_to, address_list, comment in slave_set}
+
+        master_keys = set(master_dict.keys())
+        slave_keys = set(slave_dict.keys())
+
+        # Записи для добавления
+        to_add = {
+            (name, forward_to, master_dict[(name, forward_to)][0], master_dict[(name, forward_to)][1])
+            for name, forward_to in master_keys - slave_keys
+        }
+
+        # Записи для удаления
+        to_remove = {
+            (name, forward_to, slave_dict[(name, forward_to)][0], slave_dict[(name, forward_to)][1])
+            for name, forward_to in slave_keys - master_keys
+        }
+
+        # Записи для обновления (изменился address-list или comment)
+        common_keys = master_keys & slave_keys
+        to_update = {
+            (name, forward_to, slave_dict[(name, forward_to)][0], master_dict[(name, forward_to)][0],
+             slave_dict[(name, forward_to)][1], master_dict[(name, forward_to)][1])
+            for name, forward_to in common_keys
+            if master_dict[(name, forward_to)] != slave_dict[(name, forward_to)]
+        }
+
+        return {
+            'add': to_add,
+            'remove': to_remove,
+            'update': to_update
+        }
+
+    def _log_dns_operations(self, operations: Dict[str, Set]):
+        """Логирование операций DNS синхронизации"""
+        add_count = len(operations['add'])
+        remove_count = len(operations['remove'])
+        update_count = len(operations['update'])
+
+        if add_count + remove_count + update_count > 0:
+            self.logger.info(f"[DNS FWD] Добавление: {add_count}, Удаление: {remove_count}, Обновление: {update_count}")
+
+    def _execute_dns_operations(self, slave_api, operations: Dict[str, Set], slave_name: str):
+        """Выполнение операций синхронизации DNS записей с комментариями"""
+        resource = slave_api.get_resource('/ip/dns/static')
+
+        # Обновление записей
+        for name, forward_to, old_address_list, new_address_list, old_comment, new_comment in operations['update']:
+            try:
+                items = resource.get(name=name, forward_to=forward_to)
+                if items:
+                    # Обновляем и address_list, и comment
+                    resource.set(
+                        id=items[0]['id'],
+                        address_list=str(new_address_list),
+                        comment=str(new_comment) if new_comment else ""
+                    )
+                    time.sleep(self.config['slave_settings']['setting_sync'].get('update_delay', 0.05))
+            except Exception as e:
+                self.error_counter += 1
+                self.logger.error(f"Ошибка обновления DNS FWD {name}->{forward_to}: {str(e)}")
+
+        # Добавление записей
+        for name, forward_to, address_list, comment in operations['add']:
+            try:
+                resource.add(
+                    name=str(name),
+                    type='FWD',
+                    forward_to=str(forward_to),
+                    address_list=str(address_list),
+                    comment=str(comment) if comment else "",
+                    ttl='1d',
+                    match_subdomain='yes'
+                )
+                time.sleep(self.config['slave_settings']['setting_sync'].get('update_delay', 0.05))
+            except Exception as e:
+                self.error_counter += 1
+                self.logger.error(f"Ошибка добавления DNS FWD {name}->{forward_to}: {str(e)}")
+
+        # Удаление записей
+        for name, forward_to, address_list, comment in operations['remove']:
+            try:
+                items = resource.get(name=name, forward_to=forward_to)
+                if items:
+                    resource.remove(id=items[0]['id'])
+                    time.sleep(self.config['slave_settings']['setting_sync'].get('update_delay', 0.05))
+            except Exception as e:
+                self.error_counter += 1
+                self.logger.error(f"Ошибка удаления DNS FWD {name}->{forward_to}: {str(e)}")
 
 if __name__ == '__main__':
     try:
