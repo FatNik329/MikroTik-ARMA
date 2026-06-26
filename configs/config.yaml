@@ -24,10 +24,11 @@ main_start:
       lm_sensors: false                        ### Запускать группу скриптов lm_sensors-*.py (True/False)
       tld_parser: false                        ### Запускать группу скриптов tld_parser.py (True/False)
       get_asn_mmdb: false                      ### Запускать группу скриптов get_asn_mmdb.py (True/False)
-      get_asn_prefixes: true
+      get_asn_prefixes: false                  ### Запускать группу сккриптов get_asn_prefixes (True/False)
+      get_suffixList: false                    ## Запускать группу сккриптов get_suffixList (True/False)
       yaml_to_txt: false                       ### Запускать группу скриптов yaml_to_txt.py (True/False)
       json_to_txt: true                        ### Запускать группу скриптов json_to_txt (True/False)
-      gen_filter_forwarding: true
+      gen_filter_forwarding: false             ### Запускать группу скриптов gen_filter_forwarding (True/False)
     maintenance:                             ## Обслуживающий функционал системы
       logs_rotate: false                      ### Запускать скрипт logs_rotate.py (True/False)
 
@@ -48,6 +49,7 @@ main_start:
       tld_parser: "1d"
       get_asn_mmdb: "14d"
       get_asn_prefixes: "1h"
+      get_suffixList: "1h"
       yaml_to_txt: "4h"
       json_to_txt: "4h"
       gen_filter_forwarding: "12h"
@@ -102,6 +104,7 @@ main_start:
         - "tld_parser.py"
         - "get_asn_mmdb.py"
         - "get_asn_prefixes.py"
+        - "get_suffixList.py"
         - "gen_filter_forwarding.py"
       base_name_patterns:
         backup_Mikrotik: "^backup_Mikrotik"
@@ -112,6 +115,7 @@ main_start:
         tld_parser: "^tld_parser"
         get_asn_mmdb: "^get_asn_mmdb"
         get_asn_prefixes: "^get_asn_prefixes"
+        get_suffixList: "^get_suffixList"
         yaml_to_txt: "^yaml_to_txt"
         json_to_txt: "^json_to_txt"
         gen_filter_forwarding: "^gen_filter_forwarding"
