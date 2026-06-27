@@ -244,7 +244,7 @@ sync_master:
   setting_sync:                 # Раздел настроек синхронизации Master
     mode: "asn"                 ## Режим синхронизации:
                                 ### domains - домены | ips - IP-адреса | asn - AS-префиксы
-                                ### dom-asn - домены + ASN | ips-asn - IP доменов + ASN
+                                ### dom-asn - домены + ASN | ips-asn - IP доменов + ASN | dns-fwd - правила DNS Forwarders
 
     update_delay: 0.1           ## Задержка между операциями (секунды)
     batch_size: 3500            ## Пакетная обработка записей (BATCH_SIZE)
