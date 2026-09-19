@@ -8,6 +8,49 @@ from pathlib import Path
 from typing import Dict, List, Set, Optional, Any
 import sys
 
+# ========== НАСТРОЙКА КОНФИГУРАЦИИ ==========
+DEFAULT_CONFIG = {
+    # Путь к JSON отчету (автоматически на основе output_file)
+    "json_report": True,  # Включить генерацию JSON отчета
+
+    # Общие DNS серверы по умолчанию (будут использоваться если не указаны другие в "dns_overrides")
+    "default_dns_servers": ["77.88.8.8","9.9.9.9"],
+
+    # Переопределение DNS серверов для категорий/доменов
+    # Ключ: категория или домен (например: "ru", "cc", "example.com")
+    # Значение: список DNS серверов
+    "dns_overrides": {
+        # Примеры:
+        # "ru": ["192.168.0.1", "192.168.0.100"],
+        # "example.com": ["192.168.0.50"],
+    },
+
+    # Основная категория для фильтрации (например: "ru", "cc", "org")
+    # Если None или пустая строка - обрабатываются все категории
+    "specific_category": [
+                      "ru", "xn--p1ai",             # TLD RUS
+                      "Github", "Yandex", "Amazon",  # ExampleService
+                     ], # None - все категории из YAML
+
+    # Дополнительный домен для фильтрации (например: "example.com")
+    "specific_domain": ["example.com", "microsoft.com"], # None - все домены
+
+    # Пути к входным YAML файлам (filter-results-dns-catsort) (абсолютные или относительные)
+    "input_files": [
+        "raw-data/TLD-List/DNS/filter-results-dns-catsort.yaml",              # TLD список
+        "raw-data/Service-List/DNS/filter-results-dns-catsort.yaml",          # Service список
+    ],
+
+    # Путь к выходному TXT файлу Forwarding
+    "output_file": "/path/to/dnscrypt-proxy/forwarding-rules.txt",
+
+    # Режим записи в выходной файл
+    # "w" - перезаписать файл
+    # "a" - добавить в конец файла
+    "output_mode": "a",
+}
+
+
 # ========== НАСТРОЙКА ЛОГИРОВАНИЯ ==========
 script_name = Path(__file__).stem
 log_filename = f"{script_name}.log"
