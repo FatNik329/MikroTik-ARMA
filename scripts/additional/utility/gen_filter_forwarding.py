@@ -8,48 +8,6 @@ from pathlib import Path
 from typing import Dict, List, Set, Optional, Any
 import sys
 
-# ========== НАСТРОЙКА КОНФИГУРАЦИИ ==========
-DEFAULT_CONFIG = {
-    # Путь к JSON отчету (автоматически на основе output_file)
-    "json_report": True,  # Включить генерацию JSON отчета
-
-    # Общие DNS серверы по умолчанию (будут использоваться если не указаны другие в "dns_overrides")
-    "default_dns_servers": ["77.88.8.8","9.9.9.9"],
-
-    # Переопределение DNS серверов для категорий/доменов
-    # Ключ: категория или домен (например: "ru", "cc", "example.com")
-    # Значение: список DNS серверов
-    "dns_overrides": {
-        # Примеры:
-        # "ru": ["192.168.0.1", "192.168.0.100"],
-        # "example.com": ["192.168.0.50"],
-    },
-
-    # Основная категория для фильтрации (например: "ru", "cc", "org")
-    # Если None или пустая строка - обрабатываются все категории
-    "specific_category": [
-                      "ru", "xn--p1ai",             # TLD RUS
-                      "Github", "Yandex", "Amazon",  # ExampleService
-                     ], # None - все категории из YAML
-
-    # Дополнительный домен для фильтрации (например: "example.com")
-    "specific_domain": ["example.com", "microsoft.com"], # None - все домены
-
-    # Пути к входным YAML файлам (filter-results-dns-catsort) (абсолютные или относительные)
-    "input_files": [
-        "raw-data/TLD-List/DNS/filter-results-dns-catsort.yaml",              # TLD список
-        "raw-data/Service-List/DNS/filter-results-dns-catsort.yaml",          # Service список
-    ],
-
-    # Путь к выходному TXT файлу Forwarding
-    "output_file": "/path/to/dnscrypt-proxy/forwarding-rules.txt",
-
-    # Режим записи в выходной файл
-    # "w" - перезаписать файл
-    # "a" - добавить в конец файла
-    "output_mode": "a",
-}
-
 # ========== НАСТРОЙКА ЛОГИРОВАНИЯ ==========
 script_name = Path(__file__).stem
 log_filename = f"{script_name}.log"
@@ -154,18 +112,6 @@ class DomainProcessor:
             return True
 
         return category in self.category_filter
-
-    def _should_process_domain(self, domain: str, category: str) -> bool:
-        """Определяет необходимость обработки домена."""
-        # Если домен в specific_domain - всегда обрабатываем
-        if self.domain_filter and domain.lower() in self.domain_filter:
-            logger.debug(f"Домен '{domain}' включен через specific_domain (категория: '{category}')")
-            return True
-
-        if self.category_filter is not None:
-            return category in self.category_filter
-
-        return True
 
     def _should_process_domain(self, domain: str, category: str) -> bool:
         """Определяет необходимость обработки домена."""
@@ -458,6 +404,53 @@ class DomainProcessor:
             logger.error(f"Ошибка сохранения в файл: {e}")
             return False
 
+    def deduplicate_txt_file(self) -> bool:
+        """Удаление дублирующихся доменов из выходного TXT-файла (первое вхождение побеждает)."""
+        try:
+            output_path = Path(self.config["output_file"])
+            if not output_path.is_absolute():
+                output_path = Path.cwd() / output_path
+
+            if not output_path.exists():
+                logger.warning(f"Файл для дедупликации не найден: {output_path}")
+                return True
+
+            with open(output_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+
+            seen: Set[str] = set()
+            unique_lines: List[str] = []
+
+            for line in lines:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                domain = stripped.split(' ', 1)[0]
+                if domain in seen:
+                    continue
+                seen.add(domain)
+                unique_lines.append(stripped + '\n')
+
+            duplicates = len([l for l in lines if l.strip()]) - len(unique_lines)
+
+            if duplicates <= 0:
+                logger.info(f"Дубликатов не найдено: {output_path} "
+                            f"(уникальных доменов: {len(unique_lines)})")
+                return True
+
+            tmp_path = output_path.with_suffix(output_path.suffix + '.tmp')
+            with open(tmp_path, 'w', encoding='utf-8') as f:
+                f.writelines(unique_lines)
+            tmp_path.replace(output_path)
+
+            logger.info(f"Удалено дубликатов: {duplicates}. "
+                        f"Осталось уникальных доменов: {len(unique_lines)}. Файл: {output_path}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Ошибка дедупликации файла: {e}")
+            return False
+
     def print_statistics(self):
         """Вывести статистику обработки."""
         logger.info("=" * 50)
@@ -494,6 +487,9 @@ def main():
         if not processor.save_to_txt():
             logger.error("Не удалось сохранить результаты")
             return 1
+
+        # Удаление дубликатов из TXT
+        processor.deduplicate_txt_file()
 
         # Генерация JSON
         if not processor.generate_json_report():
