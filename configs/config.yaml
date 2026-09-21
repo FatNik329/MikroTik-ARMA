@@ -29,6 +29,7 @@ main_start:
       yaml_to_txt: false                       ### Запускать группу скриптов yaml_to_txt.py (True/False)
       json_to_txt: true                        ### Запускать группу скриптов json_to_txt (True/False)
       gen_filter_forwarding: false             ### Запускать группу скриптов gen_filter_forwarding (True/False)
+      ip_comparator: false                     ### Запускать группу скриптов ip_comparator (True/False)
     maintenance:                             ## Обслуживающий функционал системы
       logs_rotate: false                      ### Запускать скрипт logs_rotate.py (True/False)
 
@@ -53,6 +54,7 @@ main_start:
       yaml_to_txt: "4h"
       json_to_txt: "4h"
       gen_filter_forwarding: "12h"
+      ip_comparator: "20m"
     maintenance:                             ## Актуальность запусков обслуживающего функционала
       logs_rotate: "false"                   ### Отключен - запуск без ограничений
 
@@ -82,6 +84,7 @@ main_start:
       - "Ошибка парсинга JSON"
       - "Ошибка безопасного сохранения"
       - "ошибка при скачивании"
+      - "ПЕРЕСЕЧЕНИЯ АДРЕСОВ ОБНАРУЖЕНЫ"
 
   scripts_discovery:                   # Секция расширения функционала оркестратора
     base:                              ## Базовая группа
@@ -106,6 +109,7 @@ main_start:
         - "get_asn_prefixes.py"
         - "get_suffixList.py"
         - "gen_filter_forwarding.py"
+        - "ip_comparator.py"
       base_name_patterns:
         backup_Mikrotik: "^backup_Mikrotik"
         lm_sensors: "^lm_sensors"
@@ -119,6 +123,7 @@ main_start:
         yaml_to_txt: "^yaml_to_txt"
         json_to_txt: "^json_to_txt"
         gen_filter_forwarding: "^gen_filter_forwarding"
+        ip_comparator: "^ip_comparator" 
     maintenance:                      ## Техническая группа
       patterns: ["*.py"]
       base_name_patterns:
