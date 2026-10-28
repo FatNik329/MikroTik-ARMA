@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Set, Optional, Any
 import sys
+import tldextract
 
 # ========== НАСТРОЙКА КОНФИГУРАЦИИ ==========
 DEFAULT_CONFIG = {
@@ -50,6 +51,12 @@ DEFAULT_CONFIG = {
     "output_mode": "a",
 }
 
+# ======= КОНСТАНТЫ tldextract  =======
+_extractor = tldextract.TLDExtract(
+    suffix_list_urls=("https://publicsuffix.org/list/public_suffix_list.dat",),
+    cache_dir="./cache/filter_results_dns/tldextract",    # постоянный каталог для кэша
+    fallback_to_snapshot=True,                            # если сети/кэша нет — встроенный PSL
+)
 
 # ========== НАСТРОЙКА ЛОГИРОВАНИЯ ==========
 script_name = Path(__file__).stem
@@ -167,6 +174,35 @@ class DomainProcessor:
 
         return True
 
+    @staticmethod
+    def _extract_second_level_domain(full_domain: str) -> Optional[str]:
+        """Извлекает домен 2-го уровня из полного домена через tldextract.
+
+        Примеры:
+            abdullahdevrel.github.io      -> github.io
+            api.gog.com                   -> gog.com
+            images-1.gog-statics.com      -> gog-statics.com
+            example.co.uk                 -> example.co.uk
+            xn--e1afmkfd.xn--p1ai         -> xn--e1afmkfd.xn--p1ai
+        """
+        if not full_domain:
+            return None
+        d = full_domain.strip().lower().rstrip(".")
+        if not d:
+            return None
+        try:
+            ext = _extractor(d)
+        except Exception as e:
+            logger.debug(f"tldextract не смог разобрать домен {full_domain!r}: {e}")
+            return None
+        # Домен 2-го уровня = registered domain (domain + suffix)
+        if ext.domain and ext.suffix:
+            return f"{ext.domain}.{ext.suffix}"
+        # Если суффикс не определён, но есть домен — отдаёт как есть
+        if ext.domain:
+            return ext.domain
+        return None
+
     def process_yaml_file(self, filepath: Path) -> Dict[str, Any]:
         """Обработка YAML файла."""
         try:
@@ -188,54 +224,123 @@ class DomainProcessor:
             domains_matched_specific = 0
 
             for category, category_data in categories.items():
-                domains = category_data.get('domains', {})
-                if not domains:
-                    logger.debug(f"Категория '{category}' не содержит domains")
-                    continue
-
-                logger.debug(f"Проверка категории: '{category}', доменов: {len(domains)}")
-
-                for second_level_domain, subdomains in domains.items():
-                    if not self._should_process_domain(second_level_domain, category):
+                # Определение формата категории:
+                #   dict с ключом "domains" -> filter-results-dns-catsort.yaml
+                #   list -> filter-results-dns.yaml (плоский список доменов)
+                if isinstance(category_data, dict):
+                    domains = category_data.get('domains', {})
+                    if not domains:
+                        logger.debug(f"Категория '{category}' не содержит domains")
                         continue
 
-                    categories_processed += 1
-                    domains_in_file += 1
+                    logger.debug(f"Проверка категории: '{category}' (формат: dict), доменов: {len(domains)}")
 
-                    if self.domain_filter and second_level_domain.lower() in self.domain_filter:
-                        domains_matched_specific += 1
+                    for second_level_domain, subdomains in domains.items():
+                        # Пропуск служебных ключей (начинаются с "_")
+                        if not isinstance(second_level_domain, str) or second_level_domain.startswith("_"):
+                            logger.debug(f"Пропущен служебный/некорректный ключ домена: {second_level_domain!r} (категория: '{category}')")
+                            continue
 
-                    # Получает DNS серверы для домена
-                    dns_servers = self._get_dns_servers_for_domain(category, second_level_domain)
+                        if not self._should_process_domain(second_level_domain, category):
+                            continue
 
-                    if self.domain_filter and second_level_domain.lower() in self.domain_filter:
-                        matched_by = "specific_domain"
-                        matched_value = second_level_domain
-                    elif self.category_filter and category in self.category_filter:
-                        matched_by = "category"
-                        matched_value = category
-                    else:
-                        matched_by = "all"
-                        matched_value = "all"
+                        categories_processed += 1
+                        domains_in_file += 1
 
-                    # Создаем строку DNS серверов
-                    dns_str = ",".join(sorted(dns_servers))
+                        if self.domain_filter and second_level_domain.lower() in self.domain_filter:
+                            domains_matched_specific += 1
 
-                    self.domains_data[second_level_domain] = dns_str
+                        # Получает DNS серверы для домена
+                        dns_servers = self._get_dns_servers_for_domain(category, second_level_domain)
 
-                    # Сбор информации для отчета (report.json)
-                    domain_info = {
-                        "domain": second_level_domain,
-                        "category": category,
-                        "source_file": str(filepath),
-                        "dns_servers": dns_servers,
-                        "matched_by": matched_by,
-                        "matched_value": matched_value
-                    }
-                    self.domains_report.append(domain_info)
+                        if self.domain_filter and second_level_domain.lower() in self.domain_filter:
+                            matched_by = "specific_domain"
+                            matched_value = second_level_domain
+                        elif self.category_filter and category in self.category_filter:
+                            matched_by = "category"
+                            matched_value = category
+                        else:
+                            matched_by = "all"
+                            matched_value = "all"
 
-                    logger.debug(f"Добавлен домен: {second_level_domain} -> {dns_str}")
-                    self.total_domains += 1
+                        # Создает строку DNS серверов
+                        dns_str = ",".join(sorted(dns_servers))
+
+                        self.domains_data[second_level_domain] = dns_str
+
+                        # Сбор информации для отчета (report.json)
+                        domain_info = {
+                            "domain": second_level_domain,
+                            "category": category,
+                            "source_file": str(filepath),
+                            "dns_servers": dns_servers,
+                            "matched_by": matched_by,
+                            "matched_value": matched_value
+                        }
+                        self.domains_report.append(domain_info)
+
+                        logger.debug(f"Добавлен домен: {second_level_domain} -> {dns_str}")
+                        self.total_domains += 1
+
+                elif isinstance(category_data, list):
+                    logger.debug(f"Проверка категории: '{category}' (формат: list), доменов: {len(category_data)}")
+
+                    for domain in category_data:
+                        # Пропуск служебных/некорректных значений
+                        if not isinstance(domain, str) or not domain.strip() or domain.startswith("_"):
+                            logger.debug(f"Пропущен служебный/некорректный домен: {domain!r} (категория: '{category}')")
+                            continue
+
+                        # Извлечение домена 2-го уровня
+                        second_level_domain = self._extract_second_level_domain(domain)
+                        if not second_level_domain:
+                            logger.debug(f"Пропущен некорректный домен (не удалось извлечь 2-й уровень): {domain!r} (категория: '{category}')")
+                            continue
+
+                        if not self._should_process_domain(second_level_domain, category):
+                            continue
+
+                        categories_processed += 1
+                        domains_in_file += 1
+
+                        if self.domain_filter and second_level_domain.lower() in self.domain_filter:
+                            domains_matched_specific += 1
+
+                        # Получение DNS сервера для домена
+                        dns_servers = self._get_dns_servers_for_domain(category, second_level_domain)
+
+                        if self.domain_filter and second_level_domain.lower() in self.domain_filter:
+                            matched_by = "specific_domain"
+                            matched_value = second_level_domain
+                        elif self.category_filter and category in self.category_filter:
+                            matched_by = "category"
+                            matched_value = category
+                        else:
+                            matched_by = "all"
+                            matched_value = "all"
+
+                        # Создание строки DNS сервера
+                        dns_str = ",".join(sorted(dns_servers))
+
+                        self.domains_data[second_level_domain] = dns_str
+
+                        # Сбор информации для отчета (report.json)
+                        domain_info = {
+                            "domain": second_level_domain,
+                            "category": category,
+                            "source_file": str(filepath),
+                            "dns_servers": dns_servers,
+                            "matched_by": matched_by,
+                            "matched_value": matched_value
+                        }
+                        self.domains_report.append(domain_info)
+
+                        logger.debug(f"Добавлен домен: {second_level_domain} -> {dns_str}")
+                        self.total_domains += 1
+
+                else:
+                    logger.debug(f"Категория '{category}' имеет неизвестный формат ({type(category_data).__name__}), пропущена")
+                    continue
 
             self.total_domains = len(self.domains_data)
 
@@ -551,5 +656,7 @@ def main():
         logger.error(f"Критическая ошибка: {e}")
         return 1
 
+if __name__ == "__main__":
+    sys.exit(main())
 if __name__ == "__main__":
     sys.exit(main())
