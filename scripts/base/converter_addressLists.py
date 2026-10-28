@@ -12,6 +12,14 @@ from unidecode import unidecode
 from datetime import datetime, timedelta
 from pathlib import Path
 from ipaddress import ip_address, AddressValueError
+import tldextract
+
+# Инициализация tldextract
+_extractor = tldextract.TLDExtract(
+    suffix_list_urls=("https://publicsuffix.org/list/public_suffix_list.dat",),
+    cache_dir="./cache/converter_addressLists/tldextract",  # постоянный каталог для кэша
+    fallback_to_snapshot=True,                              # если сети/кэша нет — встроенный PSL
+)
 
 # Создание директории logs/main_start
 log_path = Path('logs/base/converter_addressLists/converter_addressLists.log')
@@ -324,6 +332,55 @@ def manual_transliterate(idn_str):
 
     return ''.join(result)
 
+def extract_second_level_domain_tldextract(domain, max_private_components=4, merge_private_suffixes=False):
+    """
+    Fallback-реализация извлечения домена через tldextract.
+    Используется, когда public_suffix_list недоступен или невалиден.
+
+    - Для ICANN-доменов: берет 1 компонент перед суффиксом (domain + suffix)
+    - Для PRIVATE-суффиксов:
+        - merge_private_suffixes=True: возвращает только суффикс
+        - merge_private_suffixes=False: возвращает все компоненты до суффикса
+          (с ограничением max_private_components)
+    """
+    try:
+        extracted = _extractor(domain)
+    except Exception as e:
+        logger.warning(f"Ошибка tldextract для домена {domain}: {e}")
+        return domain
+
+    suffix = extracted.suffix
+    if not suffix:
+        # Нет известного суффикса — возвращает как есть
+        return domain
+
+    try:
+        tld_extractor = _extractor._get_tld_extractor()
+        is_private = suffix in tld_extractor.tlds_incl_private
+    except Exception:
+        is_private = False
+
+    if is_private:
+        suffix_parts = suffix.split('.')
+        if merge_private_suffixes:
+            return suffix
+
+        # Все компоненты до суффикса + суффикс
+        full_parts = domain.lower().split('.')
+        suffix_start = len(full_parts) - len(suffix_parts)
+        if suffix_start > 0:
+            components_before = full_parts[:suffix_start]
+            if len(components_before) > max_private_components:
+                components_before = components_before[-max_private_components:]
+            return '.'.join(components_before + suffix_parts)
+        return domain
+
+    # ICANN: domain + suffix (1 компонент перед суффиксом)
+    if extracted.domain:
+        return f"{extracted.domain}.{suffix}"
+
+    return domain
+
 def extract_second_level_domain(domain, public_suffixes=None, max_private_components=4, merge_private_suffixes=False):
     """
     Извлекает домен для DNS Forwarder с учетом ICANN и PRIVATE секций.
@@ -424,6 +481,19 @@ def process_dns_file(results_path, config):
 
         # Загрузка public_suffix_list
         public_suffixes = load_public_suffix_list(config)
+        use_tldextract_fallback = public_suffixes is None
+        if use_tldextract_fallback:
+            logger.info("public_suffix_list недоступен — используется tldextract как fallback")
+
+        # Локальный диспетчер: основной путь — public_suffix_list, fallback — tldextract
+        def _extract_domain(domain):
+            if use_tldextract_fallback:
+                return extract_second_level_domain_tldextract(
+                    domain, max_private_components, merge_private_suffixes
+                )
+            return extract_second_level_domain(
+                domain, public_suffixes, max_private_components, merge_private_suffixes
+            )
 
         # Загрузка кэша комментариев
         cache = load_comment_cache(list_name)
@@ -470,12 +540,7 @@ def process_dns_file(results_path, config):
             # Сбор доменов 2-го уровня для DNS Forwarder
             if not skip_dnsFWD:
                 for domain in domains.keys():
-                    second_level = extract_second_level_domain(
-                        domain,
-                        public_suffixes,
-                        max_private_components,
-                        merge_private_suffixes
-                    )
+                    second_level = _extract_domain(domain)
                     all_data['second_level_domains'].add(second_level)
 
             # Обработка каждого домена
@@ -576,12 +641,7 @@ def process_dns_file(results_path, config):
                 # Сбор доменов категории
                 category_domains = set()
                 for domain in data.get("categories", {}).get(category, {}).keys():
-                    second_level = extract_second_level_domain(
-                        domain,
-                        public_suffixes,
-                        max_private_components,
-                        merge_private_suffixes
-                    )
+                    second_level = _extract_domain(domain)
                     category_domains.add(second_level)
 
                 if category_domains:
