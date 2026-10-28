@@ -33,7 +33,7 @@ fi
 
 # PART2 - создание основных директории проекта
 echo "📁 Создание структуры директорий проекта"
-mkdir -p security cache cache/bgp_announce_routes raw-data output-data configs/AddressLists logs/base logs/additional logs/helper
+mkdir -p security cache cache/bgp_announce_routes cache/filter_results_dns raw-data output-data configs/AddressLists logs/base logs/additional logs/helper
 echo "✅ Директории созданы"
 
 # и файлов c чувствительными данными (mikrotik.yaml, notify.yaml)
