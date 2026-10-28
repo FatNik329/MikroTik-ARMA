@@ -7,7 +7,7 @@
 [![Wiki badge](https://img.shields.io/badge/wiki-page-darkblue)](https://github.com/FatNik329/MikroTik-ARMA/wiki)
 [![Language](https://img.shields.io/badge/Python-v3.11-green)](https://www.python.org/downloads)
 [![RouterOS](https://img.shields.io/badge/RouterOS-6.49-blue)](https://help.mikrotik.com/docs/display/ROS/RouterOS)
-[![DNScrypt-proxy](https://img.shields.io/badge/DNScrypt--proxy-page-silver)](https://github.com/jedisct1/dnscrypt-proxy)
+[![DNScrypt-proxy](https://img.shields.io/badge/DNScrypt--proxy-page-silver)](https://github.com/DNSCrypt/dnscrypt-proxy)
 [![RouterAPI](https://img.shields.io/badge/RouterOS--api-page-turquoise)](https://pypi.org/project/RouterOS-api)
 [![RIPEstat](https://img.shields.io/badge/RIPEstat-page-darkblue)](https://stat.ripe.net)
 [![bgp.tools](https://img.shields.io/badge/bgp.tools-page-darkred)](https://bgp.tools)
