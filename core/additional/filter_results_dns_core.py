@@ -4,12 +4,20 @@
 import yaml
 import logging
 import os
+import tldextract
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any
 from core.maintenance.logs_modules import LoggerManager
 
+
 _logger = logging.getLogger(__name__)
+
+_extractor = tldextract.TLDExtract(
+    suffix_list_urls=("https://publicsuffix.org/list/public_suffix_list.dat",),
+    cache_dir="./cache/filter_results_dns/tldextract",    # постоянный каталог для кэша
+    fallback_to_snapshot=True,            # если сети/кэша нет — встроенный PSL
+)
 
 def load_yaml_file(file_path):
     """Загрузка YAML файла с обработкой ошибок"""
@@ -166,62 +174,72 @@ def process_dns_data(input_data, existing_output_data=None):
         _logger.error(f"Ошибка при обработке DNS данных: {e}")
         raise
 
-def create_catsort_file(output_data, output_file_path):
-    """Создание файла с категоризацией доменов по уровням"""
-    try:
-        catsort_data = {
-            'meta': output_data['meta'].copy(),
-            'categories': {}
-        }
+def get_registrable_domain(domain: str):
+    ext = _extractor(domain)
+    if not ext.domain or not ext.suffix:
+        return None
+    return f"{ext.domain}.{ext.suffix}"
 
-        # Обновляет статистику для catsort
+def create_catsort_file(output_data, output_file_path, existing_catsort_data=None):
+    try:
+        today = datetime.now().strftime('%Y-%m-%d')
+
+        old_meta = {}
+        if existing_catsort_data and isinstance(existing_catsort_data.get('categories'), dict):
+            for cat, cat_data in existing_catsort_data['categories'].items():
+                old_meta[cat] = {}
+                domains_map = (cat_data or {}).get('domains') or {}
+                for l2, l2_val in domains_map.items():
+                    if isinstance(l2_val, dict):
+                        old_meta[cat][l2] = {
+                            'date_added': l2_val.get('_date_added', today),
+                            'subdomains': {k: v for k, v in l2_val.items() if k != '_date_added'},
+                        }
+                    elif isinstance(l2_val, list):
+                        old_meta[cat][l2] = {'date_added': today, 'subdomains': {}}
+
+        catsort_data = {'meta': output_data['meta'].copy(), 'categories': {}}
         total_l2_domains = 0
 
         for category, domains in output_data['categories'].items():
             catsort_data['categories'][category] = {'domains': {}}
-
-            # Группирует домены по доменам 2-го уровня
             domain_tree = {}
 
             for domain in domains:
-                # Проверка на None и пустые значения
                 if domain is None or not isinstance(domain, str):
                     _logger.warning(f"Пропущен некорректный домен: {domain}")
                     continue
 
-                parts = domain.split('.')
-                if len(parts) >= 2:
-                    l2_domain = '.'.join(parts[-2:])
-                    if len(parts) > 2:
-                        subdomain = '.'.join(parts[:-2])
-                        if l2_domain not in domain_tree:
-                            domain_tree[l2_domain] = []
-                        domain_tree[l2_domain].append(domain)
-                    else:
-                        if l2_domain not in domain_tree:
-                            domain_tree[l2_domain] = []
+                reg = get_registrable_domain(domain)
+                if not reg:
+                    _logger.warning(f"Не удалось определить registrable domain: {domain!r} (категория: {category})")
+                    continue
 
-            # Сортирует и формирует структуру
-            for l2_domain, subdomains in sorted(domain_tree.items()):
-                if subdomains:
-                    unique_subs = sorted(list(set(subdomains)))
-                    catsort_data['categories'][category]['domains'][l2_domain] = unique_subs
-                    total_l2_domains += 1
-                else:
-                    # Домен без субдоменов - пустой список
-                    catsort_data['categories'][category]['domains'][l2_domain] = []
-                    total_l2_domains += 1
+                domain_tree.setdefault(reg, set())
+                if domain != reg:
+                    domain_tree[reg].add(domain)
 
-        # Обновление статистики
+            old_cat = old_meta.get(category, {})
+
+            for reg_domain in sorted(domain_tree.keys()):
+                subs = sorted(domain_tree[reg_domain])
+                old_l2 = old_cat.get(reg_domain, {})
+                old_subs = old_l2.get('subdomains', {})
+
+                l2_date = old_l2.get('date_added', today)
+                entry = {'_date_added': l2_date}
+                for sub in subs:
+                    entry[sub] = old_subs.get(sub, today)
+
+                catsort_data['categories'][category]['domains'][reg_domain] = entry
+                total_l2_domains += 1
+
         catsort_data['meta']['statistics']['total_domains_l2'] = total_l2_domains
 
-        # Сохранение файла - атомарное
         catsort_path = output_file_path.parent / f"{output_file_path.stem}-catsort.yaml"
         save_yaml_file_atomic(catsort_data, catsort_path)
         _logger.info(f"Создан файл категоризации: {catsort_path}")
-
         return True
-
     except Exception as e:
         _logger.error(f"Ошибка при создании catsort файла: {e}")
         return False
@@ -277,12 +295,20 @@ class FilterResultsDnsCore:
             _logger.info("Сохранение результата...")
             save_yaml_file_atomic(output_data, output_path)
 
-            # Создание catsort файла если включено
             if DOMAINS_CATSORT.lower() == "true":
                 _logger.info("Создание файла категоризации доменов...")
-                # Загрузка OUTPUT_FILE для категоризации
                 final_output_data = load_yaml_file(output_path)
-                create_catsort_file(final_output_data, output_path)
+
+                catsort_path = output_path.parent / f"{output_path.stem}-catsort.yaml"
+                existing_catsort_data = None
+                if catsort_path.exists():
+                    try:
+                        existing_catsort_data = load_yaml_file(catsort_path)
+                        _logger.info(f"Обнаружен существующий catsort-файл: {catsort_path}")
+                    except Exception as e:
+                        _logger.warning(f"Не удалось загрузить существующий catsort-файл: {e}. Даты будут проставлены заново.")
+
+                create_catsort_file(final_output_data, output_path, existing_catsort_data)
 
             # Логирование статистики
             stats = output_data['meta']['statistics']
