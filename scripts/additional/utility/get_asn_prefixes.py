@@ -105,7 +105,8 @@ class FileManager:
 
     def _cleanup_old_backups(self, filename: str):
         """Очистка старых бэкапов для конкретного файла"""
-        backups = sorted(self.backup_dir.glob(f"*-{filename}"))
+        backups = sorted(self.backup_dir.glob(f"*-{filename}"), key=lambda p: p.stat().st_mtime)
+
         if len(backups) > self.max_backups:
             for old_backup in backups[:-self.max_backups]:
                 old_backup.unlink()
@@ -113,7 +114,7 @@ class FileManager:
 
     def restore_backup(self, file_path: Path) -> bool:
         """Восстановление последнего бэкапа файла"""
-        backups = sorted(self.backup_dir.glob(f"*-{file_path.name}"))
+        backups = sorted(self.backup_dir.glob(f"*-{file_path.name}"), key=lambda p: p.stat().st_mtime)
 
         if not backups:
             logger.warning(f"Нет доступных бэкапов для {file_path.name}")
@@ -355,7 +356,7 @@ class ASNPrefixesUpdater:
 
         # Проверяет TTL
         if self.file_manager.is_fresh(file_path, ttl_minutes):
-            logger.info(f"Файл {filename} актуален (возраст менее {ttl_minutes} мин), пропуск скачиваниея")
+            logger.info(f"Файл {filename} актуален (возраст менее {ttl_minutes} мин), пропуск скачивания")
             return True
 
         # Создает бэкап
