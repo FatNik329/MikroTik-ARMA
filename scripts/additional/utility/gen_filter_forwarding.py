@@ -58,6 +58,7 @@ _extractor = tldextract.TLDExtract(
     fallback_to_snapshot=True,                            # если сети/кэша нет — встроенный PSL
 )
 
+
 # ========== НАСТРОЙКА ЛОГИРОВАНИЯ ==========
 script_name = Path(__file__).stem
 log_filename = f"{script_name}.log"
@@ -105,8 +106,20 @@ class DomainProcessor:
             else:
                 self.category_filter = [specific_category]
         elif isinstance(specific_category, list):
-            # Фильтрует пустые значения и строки
+        # Фильтрует пустые значения и строки
             valid_categories = [cat for cat in specific_category if cat and isinstance(cat, str)]
+            if valid_categories:
+                seen = set()
+                duplicates = set()
+                for cat in valid_categories:
+                    if cat in seen:
+                        duplicates.add(cat)
+                    else:
+                        seen.add(cat)
+                if duplicates:
+                    logger.warning(
+                        f"Обнаружены дубликаты в specific_category: {sorted(duplicates)}"
+                    )
             self.category_filter = valid_categories if valid_categories else None
         else:
             logger.warning(f"Неверный формат specific_category: {type(specific_category)}. Использую None.")
@@ -127,17 +140,30 @@ class DomainProcessor:
             else:
                 self.domain_filter = {specific_domain.lower()}
         elif isinstance(specific_domain, list):
+            # Информирование о дубликатах в specific_domain (до приведения к set)
+            raw_domains = [
+                str(dom).lower().strip()
+                for dom in specific_domain
+                if dom and isinstance(dom, str) and str(dom).strip()
+            ]
+            if raw_domains:
+                seen = set()
+                duplicates = set()
+                for dom in raw_domains:
+                    if dom in seen:
+                        duplicates.add(dom)
+                    else:
+                        seen.add(dom)
+                if duplicates:
+                    logger.warning(
+                        f"Обнаружены дубликаты в specific_domain: {sorted(duplicates)}"
+                    )
             # Фильтрует пустые значения и строки, приводим к нижнему регистру
-            valid_domains = {str(dom).lower().strip()
-                           for dom in specific_domain
-                           if dom and isinstance(dom, str) and str(dom).strip()}
+            valid_domains = set(raw_domains)
             self.domain_filter = valid_domains if valid_domains else None
         else:
             logger.warning(f"Неверный формат specific_domain: {type(specific_domain)}. Использую None.")
             self.domain_filter = None
-
-        if self.domain_filter:
-            logger.info(f"Установлен фильтр доменов: {list(self.domain_filter)}")
 
     def _get_dns_servers_for_domain(self, category: str, domain: str) -> List[str]:
         """Получение DNS серверов для домена с учетом dns_overrides."""
@@ -427,9 +453,9 @@ class DomainProcessor:
         self.failed_files_list = []
 
         logger.info("=" * 50)
-        logger.info("Начало обработки YAML файлов")
-        logger.info(f"Основная категория: {self.config['specific_category']}")
-        logger.info(f"Конкретный домен: {self.config['specific_domain']}")
+        logger.info("Начало обработки YAML файлов\n")
+        logger.info(f"Фильтр категорий: {self.config['specific_category']}\n")
+        logger.info(f"Фильтр доменов: {self.config['specific_domain']}\n")
         logger.info(f"Количество файлов для обработки: {len(self.config['input_files'])}")
         logger.info("=" * 50)
 
@@ -656,7 +682,5 @@ def main():
         logger.error(f"Критическая ошибка: {e}")
         return 1
 
-if __name__ == "__main__":
-    sys.exit(main())
 if __name__ == "__main__":
     sys.exit(main())
