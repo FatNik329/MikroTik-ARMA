@@ -68,6 +68,10 @@ class ScriptCache:
             logger.error(f"Ошибка парсинга интервала '{interval}': {e}")
             return None
 
+    def get_interval_delta(self, interval: str) -> timedelta | None:
+        """Публичная обёртка: возвращает timedelta интервала или None"""
+        return self._parse_interval(interval)
+
     def is_script_required(self, script_category: str, script_name: str, interval: str) -> bool:
         """Проверяет необходимость запуска скрипта с учётом категории"""
         delta = self._parse_interval(interval)
@@ -206,7 +210,7 @@ class ProjectOrchestrator:
                 script_name = Path(script_path).stem
                 base_name = self._get_base_script_name(script_name)
                 additional_scripts.append((base_name, script_name))
-                logger.debug(f"Обнаружен дополнительный скрипт: {script_name} (базовое: {base_name})")
+                logger.debug(f"Обнаружен дополнительный скрипт: {script_name} (шаблон: {base_name})")
 
         return additional_scripts
 
@@ -241,7 +245,7 @@ class ProjectOrchestrator:
                         extracted_base = self._get_base_script_name(script_name)
                         if extracted_base == base_name:
                             base_scripts.append((base_name, script_name))
-                            logger.debug(f"Обнаружен базовый скрипт: {script_name} (базовое: {base_name})")
+                            logger.debug(f"Обнаружен базовый скрипт: {script_name} (шаблон: {base_name})")
                             break
 
             for script_path in found_scripts:
@@ -257,7 +261,7 @@ class ProjectOrchestrator:
                 if not script_name.startswith('__'):
                     base_name = self._get_base_script_name(script_name)
                     base_scripts.append((base_name, script_name))
-                    logger.debug(f"Обнаружен базовый скрипт: {script_name} (базовое: {base_name})")
+                    logger.debug(f"Обнаружен базовый скрипт: {script_name} (шаблон: {base_name})")
 
         return base_scripts
 
@@ -290,7 +294,7 @@ class ProjectOrchestrator:
                         extracted_base = self._get_base_script_name(script_name)
                         if extracted_base == maintenance_name:
                             maintenance_scripts.append((maintenance_name, script_name))
-                            logger.debug(f"Обнаружен обслуживающий скрипт: {script_name} (базовое: {maintenance_name})")
+                            logger.debug(f"Обнаружен обслуживающий скрипт: {script_name} (шаблон: {maintenance_name})")
                             break
 
             for script_path in found_scripts:
@@ -306,12 +310,12 @@ class ProjectOrchestrator:
                 if not script_name.startswith('__'):
                     maintenance_name = self._get_base_script_name(script_name)
                     maintenance_scripts.append((maintenance_name, script_name))
-                    logger.debug(f"Обнаружен скрипт: {script_name} (базовое: {maintenance_name})")
+                    logger.debug(f"Обнаружен скрипт: {script_name} (шаблон: {maintenance_name})")
 
         return maintenance_scripts
 
     def _get_base_script_name(self, full_name: str) -> str:
-        """Извлекает базовое имя скрипта из полного имени на основе правил из конфига"""
+        """Извлекает шаблонное имя скрипта из полного имени на основе правил из конфига"""
 
         # Получение правила из configs/config.yaml
         base_name_patterns = self.config.get('scripts_discovery', {}).get('additional', {}).get('base_name_patterns', {})
@@ -722,54 +726,6 @@ class ProjectOrchestrator:
         """Выводит информацию об обнаруженных скриптах и порядке запуска"""
 
         print("\n" + "="*60)
-        print("MikroTik-ARMA Orchestrator: Информация о скриптах")
-        print("="*60)
-
-        # Информация о порядке выполнения
-        print(f"\n📋 Порядок выполнения групп: {', '.join(self.execution_order)}")
-
-        # Статистика по группам
-        total_all = 0
-        total_enabled = 0
-
-        for category in self.execution_order:
-            if category not in self.script_categories:
-                print(f"\n⚠️  Группа '{category}' не содержит скриптов")
-                continue
-
-            scripts = self.script_categories[category]
-            if not scripts:
-                print(f"\n📁 {category.upper()}: нет скриптов")
-                continue
-
-            print(f"\n📁 {category.upper()} ({len(scripts)} скриптов):")
-
-            for base_name, full_name in sorted(scripts):
-                enabled = self.is_script_enabled(category, base_name)
-                cache_interval = self.get_cache_interval(category, base_name)
-
-                status = "✅" if enabled else "❌"
-                total_all += 1
-                if enabled:
-                    total_enabled += 1
-
-                cache_info = f", кэш: {cache_interval}" if cache_interval != 'false' else ""
-
-                print(f"  {status} {full_name} (базовое: {base_name}{cache_info})")
-
-        # Общая статистика
-        print("\n" + "="*60)
-        print(f"ИТОГО:")
-        print(f"   Всего скриптов: {total_all}")
-        print(f"   Активных: {total_enabled} ✅")
-        print(f"   Отключено: {total_all - total_enabled} ❌")
-        print("="*60 + "\n")
-
-
-    def print_scripts_info(self) -> None:
-        """Выводит информацию об обнаруженных скриптах и порядке запуска"""
-
-        print("\n" + "="*60)
         print("🔍 MikroTik-ARMA Orchestrator: Информация о скриптах")
         print("="*60)
 
@@ -779,6 +735,8 @@ class ProjectOrchestrator:
         # Статистика по группам
         total_all = 0
         total_enabled = 0
+        total_error_blocked = 0   # активная блокировка после ошибки
+        total_error_any = 0       # есть .error-файл (в т.ч. уже разблокированные)
 
         for category in self.execution_order:
             if category not in self.script_categories:
@@ -804,21 +762,76 @@ class ProjectOrchestrator:
                 # Строка с информацией о кэше
                 cache_info = f", кэш: {cache_interval}" if cache_interval != 'false' else ""
 
-                print(f"  {status} {full_name} (базовое: {base_name}{cache_info})")
+                print(f"  {status} {full_name} (шаблон: {base_name}{cache_info})")
 
-                # Время последнего запуска из кэша
+                # Время последнего запуска из кэша + причина/статус следующего запуска
                 if enabled and cache_interval != 'false':
                     cache_file = self.script_cache._get_cache_path(category, full_name)
-                    if cache_file.exists():
+                    interval_delta = self.script_cache.get_interval_delta(cache_interval)
+                    now = datetime.now()
+
+                    # 1) Кэш: последний и следующий запуск
+                    cache_blocks_launch = False
+                    next_run = None
+
+                    if cache_file.exists() and interval_delta:
                         last_run = datetime.fromtimestamp(cache_file.stat().st_mtime)
+                        next_run = last_run + interval_delta
                         print(f"      ⏱ Последний запуск: {last_run.strftime('%Y-%m-%d %H:%M')}")
+                        if next_run > now:
+                            cache_blocks_launch = True
+
+                    # 2) Блокировка после ошибки
+                    error_blocks_launch = False
+                    restart_delay = self.config.get('settings_cache', {}).get('restart_after_error', 0)
+
+                    if self.error_cache is not None:
+                        last_error = self.error_cache.get_last_error_time(category, full_name)
+                        if last_error is not None:
+                            total_error_any += 1
+                            if restart_delay > 0:
+                                unblock_at = last_error + timedelta(hours=restart_delay)
+                                if now < unblock_at:
+                                    error_blocks_launch = True
+                                    print(f"      ⚠️ Последняя ошибка: {last_error.strftime('%Y-%m-%d %H:%M')}, "
+                                          f"разблокировка после {unblock_at.strftime('%Y-%m-%d %H:%M')}")
+                            else:
+                                print(f"      ⚠️ Последняя ошибка: {last_error.strftime('%Y-%m-%d %H:%M')} "
+                                      f"(без блокировки, скрипт будет запущен)")
+
+                    if error_blocks_launch:
+                        total_error_blocked += 1
+
+                    # 3) Итоговый статус
+                    if error_blocks_launch:
+                        pass
+                    elif cache_blocks_launch and next_run is not None:
+                        remaining = next_run - now
+                        hours, rem = divmod(int(remaining.total_seconds()), 3600)
+                        minutes = rem // 60
+                        print(f"      ⏭ Следующий запуск: {next_run.strftime('%Y-%m-%d %H:%M')} "
+                              f"(через {hours}ч {minutes}м)")
+                    else:
+                        if cache_file.exists() and interval_delta:
+                            # кэш есть, но просрочен
+                            print(f"      🔔 Следующий запуск: при следующем старте "
+                                  f"(кэш просрочен с {next_run.strftime('%Y-%m-%d %H:%M')})")
+                        else:
+                            # кэша отсутствует
+                            print(f"      🔔 Следующий запуск: при следующем старте (кэш отсутствует)")
 
         # Общая статистика
         print("\n" + "="*60)
         print(f"📊 ИТОГО:")
         print(f"   Всего скриптов: {total_all}")
-        print(f"   Активных: {total_enabled} ✅")
+        print(f"   Подключено: {total_enabled} ✅")
         print(f"   Отключено: {total_all - total_enabled} ❌")
+        if total_error_any > 0:
+            if total_error_blocked > 0:
+                print(f"   Завершились с ошибкой: {total_error_blocked} ⚠️ "
+                      f"(из них заблокированы от перезапуска)")
+            else:
+                print(f"   Завершились с ошибкой: {total_error_any} ⚠️ (блокировка не активна)")
         print("="*60 + "\n")
 
     def run(self, check_only: bool = False) -> None:
@@ -843,6 +856,21 @@ class ProjectOrchestrator:
         logger.info(f"Обнаружено дополнительных скриптов: {len(self.script_categories['additional'])}")
         logger.info(f"Обнаружено базовых скриптов: {len(self.script_categories['base'])}")
         logger.info(f"Обнаружено обслуживающих скриптов: {len(self.script_categories['maintenance'])}")
+
+        # Инициализация кэшей
+        try:
+            self.script_cache = ScriptCache(self.base_dir)
+        except Exception as e:
+            logger.error(f"Ошибка инициализации кэша: {e}")
+            self.send_notification("Ошибка инициализации кэша!", True)
+            sys.exit(1)
+
+        try:
+            self.error_cache = ErrorCache(self.base_dir)
+        except Exception as e:
+            logger.error(f"Ошибка инициализации кэша ошибок: {e}")
+            self.send_notification("Ошибка инициализации кэша ошибок", True)
+            sys.exit(1)
 
         # Режим проверки -> вывод информации
         if check_only:
@@ -874,14 +902,6 @@ class ProjectOrchestrator:
         except Exception as e:
             logger.error(f"Ошибка инициализации кэша: {e}")
             self.send_notification("Ошибка инициализации кэша!", True)
-            sys.exit(1)
-
-        # Инициализация кэша ошибок
-        try:
-            self.error_cache = ErrorCache(self.base_dir)
-        except Exception as e:
-            logger.error(f"Ошибка инициализации кэша ошибок: {e}")
-            self.send_notification("Ошибка инициализации кэша ошибок", True)
             sys.exit(1)
 
         # Подсчёт общего количества активных скриптов
