@@ -93,6 +93,21 @@ email:      # раздел настроек Email
   password: "exampleAPP-PASS"  # Рекомендуется использовать пароль приложений
   from_addr: "example@yandex.ru"
   to_addr: "example@yandex.ru"
+  # --- Monitoring Push (heartbeat) ---
+push_monitor:
+  enabled: 'true'              # 'true' / 'false'
+  mode: 'query'                 # 'query' (Uptime Kuma-подобные) | 'path' (Healthchecks-подобные)
+  timeout: 10                   # сек на HTTP-запрос
+  # --- mode: query ---
+  # Пример для Uptime Kuma:
+  push_url: 'https://monitoring.example.com/api/push/<your_Token>'    # <-- БЕЗ ?status=...&msg=...
+  success_status: 'up'
+  failure_status: 'down'
+  msg: 'arma_is_alive'
+  # --- mode: path ---
+  # Пример для Healthchecks.io:
+  #   success_url: 'https://hc-ping.com/<uuid>'
+  #   failure_url: 'https://hc-ping.com/<uuid>/fail'
 
 EOF
 
