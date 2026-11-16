@@ -13,9 +13,14 @@ from datetime import datetime, timedelta
 import signal
 import smtplib
 from email.mime.text import MIMEText
+from email.utils import formatdate
+from email.mime.multipart import MIMEMultipart
 import glob
 import re
-
+import fcntl
+import atexit
+import requests
+import html
 
 # Создание директории logs/main_start
 log_path = Path('logs/main_start/main_start.log')
@@ -162,6 +167,8 @@ class ProjectOrchestrator:
         self.execution_order = []
         self.config: Dict[str, Any] = {}
         self.telegram_config: Dict[str, str] = {}
+        # Буфер WARNING-уведомлений за текущий прогон конвейера.
+        self._warning_events: List[Dict[str, Any]] = []
 
         # Определение порядка выполнения скриптов по категориям
         self.script_categories = {
@@ -185,6 +192,11 @@ class ProjectOrchestrator:
 
         # Инициализация флага завершения
         self._shutdown_requested = False
+
+        # Атрибуты для runtime-лока
+        self._lock_fd = None
+        self._lock_path = self.base_dir / 'cache' / 'main_start' / 'shell.lock'
+
         # Регистрация обработчиков сигналов
         signal.signal(signal.SIGINT, self._handle_signal)
         signal.signal(signal.SIGTERM, self._handle_signal)
@@ -325,11 +337,62 @@ class ProjectOrchestrator:
                 return base_name
         return full_name
 
+    @staticmethod
+    def _plural_scripts(n: int) -> str:
+        """Возвращает правильную форму слова 'скрипт' для числа n"""
+        if n % 10 == 1 and n % 100 != 11:
+            return "скрипт"
+        elif n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
+            return "скрипта"
+        else:
+            return "скриптов"
+
     def _handle_signal(self, signum, frame):
         """Обработчик сигналов завершения"""
-        logger.warning(f"Получен сигнал {signum}, инициирую завершение...")
+        logger.warning(f"Получен сигнал {signum}, инициируется завершение")
         self._shutdown_requested = True
         self.send_notification(f"Получен сигнал завершения {signum}", True)
+
+    def _acquire_lock(self) -> bool:
+        """Получение эксклюзивного неблокирующиего лока. True — лок взят."""
+        try:
+            self._lock_path.parent.mkdir(parents=True, exist_ok=True)
+            self._lock_fd = open(self._lock_path, 'w')
+            fcntl.flock(self._lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            # Запись PID и время
+            self._lock_fd.write(f"{os.getpid()} {datetime.now().isoformat()}\n")
+            self._lock_fd.flush()
+
+            logger.info(f"[LOCK] Runtime-лок захвачен: {self._lock_path} (PID {os.getpid()})")
+            return True
+
+        except BlockingIOError:
+            logger.warning(f"[LOCK] Оркестратор уже выполняется (лок занят: {self._lock_path})")
+            if self._lock_fd:
+                self._lock_fd.close()
+                self._lock_fd = None
+            return False
+
+        except Exception as e:
+            logger.error(f"[LOCK] Ошибка захвата лока: {e}")
+            if self._lock_fd:
+                self._lock_fd.close()
+                self._lock_fd = None
+            return False
+
+    def _release_lock(self) -> None:
+        """Освобождение runtime-лок."""
+        if self._lock_fd is None:
+            return
+        try:
+            fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
+            self._lock_fd.close()
+            logger.debug(f"[LOCK] Runtime-лок освобождён: {self._lock_path}")
+        except Exception as e:
+            logger.error(f"[LOCK] Ошибка освобождения лока: {e}")
+        finally:
+            self._lock_fd = None
 
     def load_configs(self) -> bool:
         try:
@@ -392,6 +455,67 @@ class ProjectOrchestrator:
             return not is_error
         return False
 
+    def send_push_heartbeat(self, is_fatal: bool = False) -> None:
+        """push-heartbeat во внешний монитор.
+        Отвечает только за рабочее состояние оркестратора:
+          - дошёл до конца -> success
+          - фатальный сбой оркестратора -> failure
+        Поддерживает два режима (см. security/notify.yaml):
+          - mode: 'query' — статус в query-параметрах (Uptime Kuma-подобные)
+          - mode: 'path'  — статус в URL-пути (Healthchecks/Cronitor/Better Stack)
+        """
+        cfg = (self.notify_config or {}).get('push_monitor', {}) or {}
+
+        if not cfg:
+            try:
+                notify_path = self.base_dir / 'security' / 'notify.yaml'
+                if notify_path.exists():
+                    with open(notify_path, 'r') as f:
+                        disk_cfg = yaml.safe_load(f) or {}
+                    cfg = disk_cfg.get('push_monitor', {}) or {}
+            except Exception as e:
+                logger.warning(f"[PUSH] Не удалось прочитать notify.yaml для heartbeat: {e}")
+                cfg = {}
+
+        if str(cfg.get('enabled', 'false')).lower() != 'true':
+            return
+
+        mode = str(cfg.get('mode', 'query')).lower()
+        timeout = int(cfg.get('timeout', 10) or 10)
+        state = 'failure' if is_fatal else 'success'
+
+        try:
+            if mode == 'path':
+                url = (cfg.get('failure_url') if is_fatal else cfg.get('success_url')) or ''
+                url = url.strip()
+                if not url:
+                    logger.warning(f"[PUSH] mode=path, но {state}_url пуст — пинг пропущен")
+                    return
+                resp = requests.get(url, timeout=timeout)
+
+            elif mode == 'query':
+                url = (cfg.get('push_url') or '').strip()
+                if not url:
+                    logger.warning("[PUSH] mode=query, но push_url пуст — пинг пропущен")
+                    return
+                status_value = cfg.get('failure_status', 'down') if is_fatal \
+                               else cfg.get('success_status', 'up')
+                params = {
+                    'status': status_value,
+                    'msg': cfg.get('msg', 'arma_is_alive'),
+                }
+                resp = requests.get(url, params=params, timeout=timeout)
+
+            else:
+                logger.warning(f"[PUSH] Неизвестный mode='{mode}' — пинг пропущен")
+                return
+
+            resp.raise_for_status()
+            logger.info(f"[PUSH] Heartbeat отправлен: state={state}, mode={mode}")
+
+        except Exception as e:
+            logger.warning(f"[PUSH] Ошибка отправки heartbeat: {e}")
+
     def send_notification(self, message: str, is_error: bool = False) -> None:
         """Общий метод отправки уведомлений"""
         logger.debug(f"Проверка уведомления: {message[:50]}... (is_error={is_error})")
@@ -445,9 +569,6 @@ class ProjectOrchestrator:
             return
 
         try:
-            import smtplib
-            from email.mime.text import MIMEText
-            from email.utils import formatdate
 
             email_cfg = self.notify_config['email']
             logger.debug(f"Конфиг email: {email_cfg}")
@@ -461,7 +582,7 @@ class ProjectOrchestrator:
             msg['To'] = email_cfg['to_addr']
             msg['Date'] = formatdate(localtime=True)
 
-            logger.debug("Подготавливаем SMTP соединение...")
+            logger.debug("Подготовка SMTP соединения...")
 
             with smtplib.SMTP_SSL(
                 host=email_cfg['smtp_server'],
@@ -553,14 +674,6 @@ class ProjectOrchestrator:
         logger.debug(f"Проверка ошибки для {script_category}/{script_name}: прошло {time_since_error:.2f} часов, осталось {restart_delay}")
         return time_since_error >= restart_delay
 
-    def get_hostname(self) -> str:
-        """Возвращает имя хоста сервера"""
-        try:
-            import socket
-            return socket.gethostname()
-        except:
-            return "UnknownHost"
-
     def setup_log_monitoring(self) -> None:
         """Настройка мониторинга логов по шаблонам"""
         log_monitoring_config = self.config.get('log_monitoring', {})
@@ -583,14 +696,93 @@ class ProjectOrchestrator:
                 break
 
     def send_log_alert(self, pattern: str, line: str, script_category: str, script_name: str) -> None:
-        """Отправляет уведомление о найденном шаблоне в логах (тип WARNING)"""
+        """Буферизует WARNING-событие из мониторинга логов."""
         message = (f"Обнаружен шаблон в логах скрипта {script_category}/{script_name}\n"
-                  f"Шаблон: {pattern}\n"
-                  f"Строка лога: {line.strip()}")
+                   f"Шаблон: {pattern}\n"
+                   f"Строка лога: {line.strip()}")
 
         logger.warning(f"Мониторинг логов: {message}")
 
-        self.send_log_monitoring_notification(message)
+        self._warning_events.append({
+            "category":  script_category,
+            "script":    script_name,
+            "base_name": self._get_base_script_name(script_name),
+            "pattern":   pattern,
+            "line":      line.strip(),
+            "time":      datetime.now(),
+            "kind":      "log_pattern",
+        })
+
+    def _format_warning_report(self, events: List[Dict[str, Any]]) -> Tuple[str, str]:
+        """Форматирование (plain_text, html) сгруппированного WARNING-отчёта."""
+        from collections import defaultdict
+
+        grouped: Dict[str, Dict[str, List[Dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
+        for ev in events:
+            grouped[ev["category"]][ev["base_name"]].append(ev)
+
+        SEP = "─" * 57
+        now = datetime.now()
+        lines_plain: List[str] = []
+        html_parts: List[str] = []
+
+        lines_plain.append(f"⚠️  MikroTik-ARMA: WARNING-отчёт ({hostname})")
+        lines_plain.append(f"Время: {now.strftime('%Y-%m-%d %H:%M:%S')}")
+        lines_plain.append(f"Всего событий: {len(events)}")
+        lines_plain.append("")
+
+        html_parts.append(
+            f"<h2>⚠️ MikroTik-ARMA: WARNING-отчёт "
+            f"<small>({html.escape(hostname)})</small></h2>"
+            f"<p>Время: <b>{now.strftime('%Y-%m-%d %H:%M:%S')}</b><br>"
+            f"Всего событий: <b>{len(events)}</b></p>"
+        )
+
+        for category in self.execution_order:
+            if category not in grouped:
+                continue
+            by_pattern = grouped[category]
+            total_cat = sum(len(v) for v in by_pattern.values())
+
+            lines_plain.append(f"📁 {category.upper()} ({total_cat} событий):")
+            html_parts.append(f"<h3>📁 {category.upper()} ({total_cat})</h3>")
+
+            first_pattern = True
+            for base_name in sorted(by_pattern.keys()):
+                evs = sorted(by_pattern[base_name], key=lambda e: e["time"])
+                if not first_pattern:
+                    lines_plain.append(f"  {SEP}")
+                first_pattern = False
+
+                lines_plain.append(f"  🔹 группа скрипта: {base_name} ({len(evs)})")
+                html_parts.append(
+                    f"<h4>🔹 группа скрипта: {html.escape(base_name)} ({len(evs)})</h4><ul>"
+                )
+
+                for ev in evs:
+                    ts = ev["time"].strftime("%Y-%m-%d %H:%M:%S")
+                    if ev["kind"] == "log_pattern":
+                        lines_plain.append(f"      [{ts}] {ev['script']}")
+                        lines_plain.append(f"         шаблон: {ev['pattern']}")
+                        lines_plain.append(f"         строка: {ev['line']}")
+                        html_parts.append(
+                            f"<li><b>{html.escape(ev['script'])}</b> — "
+                            f"<code>{ts}</code><br>"
+                            f"шаблон: <code>{html.escape(str(ev['pattern']))}</code><br>"
+                            f"строка: <code>{html.escape(str(ev['line']))}</code></li>"
+                        )
+                    else:
+                        msg_txt = str(ev.get("message", ""))
+                        lines_plain.append(f"      [{ts}] {ev['script']}: {msg_txt}")
+                        html_parts.append(
+                            f"<li><b>{html.escape(ev['script'])}</b> — "
+                            f"<code>{ts}</code><br>{html.escape(msg_txt)}</li>"
+                        )
+
+                html_parts.append("</ul>")
+            lines_plain.append("")
+
+        return "\n".join(lines_plain), "\n".join(html_parts)
 
     def send_log_monitoring_notification(self, message: str) -> None:
         """Отправляет уведомление от мониторинга логов (отдельный тип)"""
@@ -599,6 +791,73 @@ class ProjectOrchestrator:
 
         if self.config.get('settings_notify', {}).get('email', 'false').lower() == 'true':
             self._send_email_log_monitoring(message)
+
+    def _send_telegram_warning_single(self, event: Dict[str, Any]) -> None:
+        """Отправляет ОДНО WARNING-событие в Telegram отдельным сообщением.
+        Используется, когда событий за прогон меньше порога (см. flush_warning_notifications).
+        """
+        if not self.notify_config.get('telegram'):
+            logger.error("Telegram конфиг не найден в notify.yaml")
+            return
+
+        try:
+            import requests
+
+            ts = event["time"].strftime('%Y-%m-%d %H:%M:%S')
+            text = (
+                f"⚠️ <b>MikroTik-ARMA: Log Monitor ({html.escape(hostname)})</b>\n"
+                f"<b>Скрипт:</b> <code>{html.escape(event['category'])}/{html.escape(event['script'])}</code>\n"
+                f"<b>Шаблон:</b> <code>{html.escape(str(event['pattern']))}</code>\n"
+                f"<b>Строка:</b> <code>{html.escape(event['line'])}</code>\n"
+                f"<b>Время:</b> <code>{ts}</code>"
+            )
+
+            MAX_LEN = 3500
+            if len(text) > MAX_LEN:
+                text = text[:MAX_LEN - 1] + "…"
+
+            url = f"https://api.telegram.org/bot{self.notify_config['telegram']['bot_token']}/sendMessage"
+            payload = {
+                'chat_id': self.notify_config['telegram']['chat_id'],
+                'text': text,
+                'parse_mode': 'HTML',
+            }
+            response = requests.post(url, json=payload, timeout=10)
+            response.raise_for_status()
+            logger.debug(f"Telegram WARNING (single) отправлен: {response.status_code}")
+
+        except Exception as e:
+            logger.error(f"Ошибка отправки Telegram WARNING (single): {str(e)}")
+
+    def _send_telegram_warning_file(self, plain_text: str) -> None:
+        """Отправляет WARNING-отчёт в Telegram одним файлом (.log).
+        Используется, когда событий за прогон >= порога.
+        """
+        if not self.notify_config.get('telegram'):
+            logger.error("Telegram конфиг не найден в notify.yaml")
+            return
+
+        try:
+            import requests
+
+            ts = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+            filename = f"arma_warnings_{ts}.log"
+            content = plain_text.encode('utf-8')
+
+            url = f"https://api.telegram.org/bot{self.notify_config['telegram']['bot_token']}/sendDocument"
+            data = {
+                'chat_id': self.notify_config['telegram']['chat_id'],
+                'caption': f"⚠️ MikroTik-ARMA: WARNING-отчёт ({hostname})",
+            }
+            files = {
+                'document': (filename, content, 'text/plain'),
+            }
+            response = requests.post(url, data=data, files=files, timeout=30)
+            response.raise_for_status()
+            logger.info(f"Telegram WARNING-файл отправлен: {filename} ({len(content)} байт)")
+
+        except Exception as e:
+            logger.error(f"Ошибка отправки Telegram WARNING-файла: {str(e)}")
 
     def _send_telegram_log_monitoring(self, message: str) -> None:
         """Отправка в Telegram от мониторинга логов"""
@@ -621,29 +880,26 @@ class ProjectOrchestrator:
         except Exception as e:
             logger.error(f"Ошибка отправки Telegram для мониторинга логов: {str(e)}")
 
-    def _send_email_log_monitoring(self, message: str) -> None:
-        """Отправка email от мониторинга логов"""
-        logger.debug("Отправка email для мониторинга логов...")
+    def _send_email_log_monitoring(self, plain: str, html_body: str) -> None:
+        """Отправка сгруппированного WARNING-отчёта"""
+        logger.debug("Отправка сгруппированного WARNING-отчёта...")
 
         if not self.notify_config.get('email'):
             logger.error("Email конфиг не найден в notify.yaml")
             return
 
         try:
-            import smtplib
-            from email.mime.text import MIMEText
-            from email.utils import formatdate
-
             email_cfg = self.notify_config['email']
 
-            # Отдельная тема для мониторинга логов
             subject = f"⚠️ MikroTik-ARMA: Log Monitoring Alert ({hostname})"
 
-            msg = MIMEText(message, 'plain', 'utf-8')
+            msg = MIMEMultipart('alternative')
             msg['Subject'] = subject
             msg['From'] = email_cfg['from_addr']
             msg['To'] = email_cfg['to_addr']
             msg['Date'] = formatdate(localtime=True)
+            msg.attach(MIMEText(plain, 'plain', 'utf-8'))
+            msg.attach(MIMEText(html_body, 'html', 'utf-8'))
 
             with smtplib.SMTP_SSL(
                 host=email_cfg['smtp_server'],
@@ -657,15 +913,48 @@ class ProjectOrchestrator:
                     msg.as_string()
                 )
 
-            logger.info(f"Email для мониторинга логов отправлен на {email_cfg['to_addr']}")
+            logger.info(f"Сгруппированный WARNING-отчёт отправлен на {email_cfg['to_addr']}")
 
         except Exception as e:
-            logger.error(f"Ошибка отправки email для мониторинга логов: {str(e)}")
+            logger.error(f"Ошибка отправки WARNING-отчёта: {str(e)}")
+
+    def flush_warning_notifications(self) -> None:
+        """Отправляет накопленные за прогон WARNING-события.
+
+        Email: одним сгруппированным письмом.
+        Telegram:
+          - 0 событий          -> ничего
+          - 1..9 событий       -> поштучно, каждое отдельным сообщением
+          - >= 10 событий      -> одним файлом (.log)
+        """
+        if not self._warning_events:
+            return
+
+        plain, html_body = self._format_warning_report(self._warning_events)
+
+        # Email — сгруппированный
+        if self.config.get('settings_notify', {}).get('email', 'false').lower() == 'true':
+            self._send_email_log_monitoring(plain, html_body)
+        else:
+            logger.debug("WARNING-буфер не отправлен на Email: email отключён в конфиге")
+
+        # Telegram — маршрутизация по количеству событий
+        if self.config.get('settings_notify', {}).get('telegram', 'false').lower() == 'true':
+            TELEGRAM_FILE_THRESHOLD = 10
+            if len(self._warning_events) >= TELEGRAM_FILE_THRESHOLD:
+                self._send_telegram_warning_file(plain)
+            else:
+                for event in self._warning_events:
+                    self._send_telegram_warning_single(event)
+        else:
+            logger.debug("WARNING-буфер не отправлен в Telegram: telegram отключён в конфиге")
+
+        # Сброс буфера
+        self._warning_events.clear()
 
     def run_script(self, script_category: str, script_name: str, base_name: str) -> bool:
-        """Запуск отдельного скрипта с учётом категории"""
         if getattr(self, '_shutdown_requested', False):
-            logger.warning("Запуск скрипта отменён (идёт завершение работы)")
+            logger.warning("Запуск скрипта отменён (завершение исполнения)")
             return False
 
         script_path = self.find_script_path(script_category, script_name)
@@ -673,11 +962,16 @@ class ProjectOrchestrator:
             logger.error(f"[FAIL] Скрипт {script_category}/{script_name} не найден по пути: {script_path}")
             return False
 
+        # Общий таймаут на запускаемый скрипт (сек). 0 = без таймаута.
+        script_timeout = int(self.config.get('script_timeout', 0) or 0)
+
         try:
-            logger.info(f"[START] Запуск {script_category}/{script_name}...")
+            logger.info(
+                f"[START] Запуск {script_category}/{script_name}..."
+                f"{f' (timeout={script_timeout}s)' if script_timeout else ''}"
+            )
             start_time = time.time()
 
-            # Запуск процесса с отдельным выводом
             process = subprocess.Popen(
                 [sys.executable, str(script_path)],
                 cwd=self.base_dir,
@@ -688,23 +982,94 @@ class ProjectOrchestrator:
                 bufsize=1
             )
 
-            # Читает вывод скрипта в реальном времени
             output_lines = []
-            while True:
-                line = process.stdout.readline()
-                if not line and process.poll() is not None:
-                    break
-                if line:
-                    line = line.strip()
-                    if line:
-                        print(line)
-                        output_lines.append(line)
+            timed_out = False
+            aborted_by_shutdown = False
 
-                        # Проверка шаблонов ТОЛЬКО в логах внешнего скрипта
-                        self.check_log_patterns(line, script_category, script_name)
+            import threading, queue
+            q = queue.Queue()
+
+            def _reader():
+                try:
+                    for ln in iter(process.stdout.readline, ''):
+                        q.put(ln)
+                finally:
+                    q.put(None)
+
+            threading.Thread(target=_reader, daemon=True).start()
+
+            while True:
+                # 1) Запрошено завершение оркестратора (Ctrl+C / SIGTERM)
+                if getattr(self, '_shutdown_requested', False):
+                    logger.warning(f"[ABORT] Запрошено завершение, остановка {script_category}/{script_name}")
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        logger.warning(
+                            f"[ABORT] SIGTERM не сработал, применяется SIGKILL {script_category}/{script_name}"
+                        )
+                        process.kill()
+                    timed_out = True
+                    aborted_by_shutdown = True
+                    break
+                # 2) Общий таймаут скрипта
+                if script_timeout and (time.time() - start_time) > script_timeout:
+                    logger.error(
+                        f"[TIMEOUT] Скрипт {script_category}/{script_name} "
+                        f"превысил {script_timeout}s — принудительное завершение"
+                    )
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        logger.warning(f"[TIMEOUT] SIGTERM не сработал, SIGKILL {script_category}/{script_name}")
+                        process.kill()
+                    timed_out = True
+                    break
+
+                # 3) Чтение строки с таймаутом 1 сек
+                try:
+                    line = q.get(timeout=1.0)
+                except queue.Empty:
+                    # 1 сек тишины
+                    if process.poll() is not None and q.empty():
+                        break
+                    continue
+
+                if line is None:
+                    break
+
+                line = line.strip()
+                if line:
+                    print(line)
+                    output_lines.append(line)
+                    self.check_log_patterns(line, script_category, script_name)
 
             process.wait()
             exec_time = time.time() - start_time
+
+            if aborted_by_shutdown:
+                # Остановка скрипта по SIGINT/SIGTERM — без инициализации ошибки.
+                # Не пишет error-кэш (иначе ручной Ctrl+C заблокирует
+                # перезапуск на restart_after_error часов) и не очищаем
+                # существующую запись об ошибке — статус скрипта неизвестен.
+                logger.warning(
+                    f"[ABORT] Скрипт {script_category}/{script_name} "
+                    f"прерван по запросу завершения оркестратора "
+                    f"(отработал {exec_time:.1f}s)"
+                )
+                return False
+
+            if timed_out:
+                # Реальный таймаут {script_timeout} скрипта — фиксирует как ошибку.
+                logger.error(
+                    f"[FAIL] Скрипт {script_category}/{script_name} "
+                    f"прерван (timeout={script_timeout}s, отработал {exec_time:.1f}s)"
+                )
+                if self.error_cache is not None:
+                    self.error_cache.set_last_error_time(script_category, script_name, datetime.now())
+                return False
 
             if process.returncode == 0:
                 logger.info(f"[DONE] Скрипт {script_category}/{script_name} успешно выполнен за {exec_time:.1f} сек")
@@ -713,7 +1078,6 @@ class ProjectOrchestrator:
                 return True
             else:
                 logger.error(f"[FAIL] Скрипт {script_category}/{script_name} завершился с ошибкой (код {process.returncode})")
-                # Сохраняет время ошибки
                 if self.error_cache is not None:
                     self.error_cache.set_last_error_time(script_category, script_name, datetime.now())
                 return False
@@ -725,9 +1089,11 @@ class ProjectOrchestrator:
     def print_scripts_info(self) -> None:
         """Выводит информацию об обнаруженных скриптах и порядке запуска"""
 
-        print("\n" + "="*60)
-        print("🔍 MikroTik-ARMA Orchestrator: Информация о скриптах")
-        print("="*60)
+        SEP = "─" * 57  # ширина разделителя под шапку
+
+        print("\n" + "=" * 60)
+        print(f"🔍 MikroTik-ARMA Orchestrator: Информация о скриптах")
+        print("=" * 60)
 
         # Информация о порядке выполнения
         print(f"\n📋 Порядок выполнения групп: {', '.join(self.execution_order)}")
@@ -735,8 +1101,8 @@ class ProjectOrchestrator:
         # Статистика по группам
         total_all = 0
         total_enabled = 0
-        total_error_blocked = 0   # активная блокировка после ошибки
-        total_error_any = 0       # есть .error-файл (в т.ч. уже разблокированные)
+        total_error_blocked = 0
+        total_error_any = 0
 
         for category in self.execution_order:
             if category not in self.script_categories:
@@ -748,11 +1114,19 @@ class ProjectOrchestrator:
                 print(f"\n📁 {category.upper()}: нет скриптов")
                 continue
 
-            print(f"\n📁 {category.upper()} ({len(scripts)} скриптов):")
+            print(f"\n📁 {category.upper()} ({len(scripts)} {self._plural_scripts(len(scripts))}):")
 
-            for base_name, full_name in sorted(scripts):
+            sorted_scripts = sorted(scripts)
+            prev_base_name = None
+
+            for idx, (base_name, full_name) in enumerate(sorted_scripts):
                 enabled = self.is_script_enabled(category, base_name)
                 cache_interval = self.get_cache_interval(category, base_name)
+
+                # Разделитель при смене шаблона
+                if idx > 0 and base_name != prev_base_name:
+                    print(f"  {SEP}")
+                prev_base_name = base_name
 
                 status = "✅" if enabled else "❌"
                 total_all += 1
@@ -770,7 +1144,7 @@ class ProjectOrchestrator:
                     interval_delta = self.script_cache.get_interval_delta(cache_interval)
                     now = datetime.now()
 
-                    # 1) Кэш: последний и следующий запуск
+                    # 1) Кэш: когда последний запуск и когда следующий
                     cache_blocks_launch = False
                     next_run = None
 
@@ -802,7 +1176,7 @@ class ProjectOrchestrator:
                     if error_blocks_launch:
                         total_error_blocked += 1
 
-                    # 3) Итоговый статус
+                    # 3) Итоговый статус: что произойдёт при следующем run()
                     if error_blocks_launch:
                         pass
                     elif cache_blocks_launch and next_run is not None:
@@ -813,15 +1187,13 @@ class ProjectOrchestrator:
                               f"(через {hours}ч {minutes}м)")
                     else:
                         if cache_file.exists() and interval_delta:
-                            # кэш есть, но просрочен
                             print(f"      🔔 Следующий запуск: при следующем старте "
                                   f"(кэш просрочен с {next_run.strftime('%Y-%m-%d %H:%M')})")
                         else:
-                            # кэша отсутствует
                             print(f"      🔔 Следующий запуск: при следующем старте (кэш отсутствует)")
 
         # Общая статистика
-        print("\n" + "="*60)
+        print("\n" + "=" * 60)
         print(f"📊 ИТОГО:")
         print(f"   Всего скриптов: {total_all}")
         print(f"   Подключено: {total_enabled} ✅")
@@ -832,7 +1204,59 @@ class ProjectOrchestrator:
                       f"(из них заблокированы от перезапуска)")
             else:
                 print(f"   Завершились с ошибкой: {total_error_any} ⚠️ (блокировка не активна)")
-        print("="*60 + "\n")
+        print("=" * 60 + "\n")
+
+    def _run_category(self, category: str, stop_on_error: bool) -> tuple[bool, list[str]]:
+        """Выполняет все скрипты одной категории.
+
+        Возвращает (has_errors, messages) — флаг ошибок и строки для execution_log.
+        """
+        titles = {
+            'additional': "Исполняется группа скриптов дополнительного функционала",
+            'base': "Исполняется группа скриптов основного функционала",
+            'maintenance': "Исполняется группа скриптов обслуживания",
+        }
+        title = titles.get(category)
+        if title:
+            logger.info(f"\n=== {title} ===")
+
+        has_errors = False
+        messages: list[str] = []
+
+        for base_name, full_name in self.script_categories.get(category, []):
+            if not self.is_script_enabled(category, base_name):
+                msg = f"[SKIP] Скрипт {category}/{full_name} отключен в конфигурации"
+                logger.info(msg)
+                messages.append(msg)
+                continue
+
+            cache_interval = self.get_cache_interval(category, base_name)
+
+            if not self.script_cache.is_script_required(category, full_name, cache_interval):
+                msg = f"[CACHE] Скрипт {category}/{full_name} пропущен (кэш актуален)"
+                logger.info(msg)
+                messages.append(msg)
+                continue
+
+            if not self.should_restart_after_error(category, full_name):
+                msg = (f"[ERROR_DELAY] Скрипт {category}/{full_name} пропущен "
+                       f"(время до перезапуска после ошибки не истекло)")
+                logger.info(msg)
+                messages.append(msg)
+                continue
+
+            script_result = self.run_script(category, full_name, base_name)
+
+            if script_result:
+                self.script_cache.update_script_timestamp(category, full_name)
+                messages.append(f"[OK] Скрипт {category}/{full_name} выполнен успешно")
+            else:
+                messages.append(f"[ERROR] Скрипт {category}/{full_name} завершился с ошибкой")
+                has_errors = True
+                if stop_on_error:
+                    break
+
+        return has_errors, messages
 
     def run(self, check_only: bool = False) -> None:
         """Основной метод запуска оркестратора
@@ -846,6 +1270,7 @@ class ProjectOrchestrator:
             self.ensure_directories()
         ]):
             self.send_notification("Ошибка инициализации!", True)
+            self.send_push_heartbeat(is_fatal=True)
             sys.exit(1)
 
         # Обнаружение скриптов
@@ -863,6 +1288,7 @@ class ProjectOrchestrator:
         except Exception as e:
             logger.error(f"Ошибка инициализации кэша: {e}")
             self.send_notification("Ошибка инициализации кэша!", True)
+            self.send_push_heartbeat(is_fatal=True)
             sys.exit(1)
 
         try:
@@ -870,6 +1296,7 @@ class ProjectOrchestrator:
         except Exception as e:
             logger.error(f"Ошибка инициализации кэша ошибок: {e}")
             self.send_notification("Ошибка инициализации кэша ошибок", True)
+            self.send_push_heartbeat(is_fatal=True)
             sys.exit(1)
 
         # Режим проверки -> вывод информации
@@ -877,197 +1304,87 @@ class ProjectOrchestrator:
             self.print_scripts_info()
             return
 
-        logger.info(f"\n")
-        logger.info("=" * 33)
-        logger.info("MikroTik-ARMA Orchestrator: START")
-        logger.info("=" * 33)
+        # Runtime-лок только для реального прогона
+        if not self._acquire_lock():
+            sys.exit(0)
 
-        logger.debug(f"Проверка конфига: email={self.config.get('settings_notify', {}).get('email')}")
-        logger.debug(f"Полный конфиг: {json.dumps(self.config, indent=2, default=str)}")
-        logger.debug(f"Конфиг уведомлений: {json.dumps(self.notify_config, indent=2)}")
-
-        if self.config.get('settings_notify', {}).get('email') == 'true':
-            logger.debug("Проверка конфигурации email...")
-            email_cfg = self.notify_config.get('email', {})
-            logger.debug(f"SMTP сервер: {email_cfg.get('smtp_server')}:{email_cfg.get('smtp_port')}")
-            logger.debug(f"Логин: {email_cfg.get('login')}")
-            logger.debug(f"Получатель: {email_cfg.get('to_addr')}")
-
-        # Настройка мониторинга логов
-        self.setup_log_monitoring()
-
-        # Доступность кэша
         try:
-            self.script_cache = ScriptCache(self.base_dir)
-        except Exception as e:
-            logger.error(f"Ошибка инициализации кэша: {e}")
-            self.send_notification("Ошибка инициализации кэша!", True)
-            sys.exit(1)
+            logger.info(f"\n")
+            logger.info("=" * 33)
+            logger.info("MikroTik-ARMA Orchestrator: START")
+            logger.info("=" * 33)
 
-        # Подсчёт общего количества активных скриптов
-        total_scripts = 0
-        for category in self.execution_order:
-            if category not in self.script_categories:
-                continue
+            logger.debug(f"Проверка конфига: email={self.config.get('settings_notify', {}).get('email')}")
+            logger.debug(f"Полный конфиг: {json.dumps(self.config, indent=2, default=str)}")
+            logger.debug(f"Конфиг уведомлений: {json.dumps(self.notify_config, indent=2)}")
 
-            if category == 'additional':
-                # В additional учитывает только включеные в конфиге
-                for base_name, full_name in self.script_categories[category]:
-                    if self.is_script_enabled(category, base_name):
-                        total_scripts += 1
+            if self.config.get('settings_notify', {}).get('email') == 'true':
+                logger.debug("Проверка конфигурации email...")
+                email_cfg = self.notify_config.get('email', {})
+                logger.debug(f"SMTP сервер: {email_cfg.get('smtp_server')}:{email_cfg.get('smtp_port')}")
+                logger.debug(f"Логин: {email_cfg.get('login')}")
+                logger.debug(f"Получатель: {email_cfg.get('to_addr')}")
+
+            # Настройка мониторинга логов
+            self.setup_log_monitoring()
+
+            # Доступность кэша
+            try:
+                self.script_cache = ScriptCache(self.base_dir)
+            except Exception as e:
+                logger.error(f"Ошибка инициализации кэша: {e}")
+                self.send_notification("Ошибка инициализации кэша!", True)
+                sys.exit(1)
+
+            # Сбор всех сообщений
+            execution_log = []
+            has_errors = False
+            stop_on_error = self.config.get('settings_notify', {}).get('stop_on_error', 'true') == 'true'
+
+            # Запуск скриптов по категориям
+            for category in self.execution_order:
+                if has_errors and stop_on_error:
+                    break
+
+                cat_errors, cat_log = self._run_category(category, stop_on_error)
+                execution_log.extend(cat_log)
+                has_errors = has_errors or cat_errors
+
+                if has_errors and stop_on_error:
+                    break
+
+            # Группа WARNING-уведомлений
+            self.flush_warning_notifications()
+
+            # Итоговый отчет (бинарный статус конвейера)
+            if has_errors:
+                final_status = "Конвейер выполнен с ошибками"
             else:
-                category_config = self.config.get('launch_chain', {}).get(category, {})
-                for base_name, full_name in self.script_categories[category]:
-                    if category_config.get(base_name, False):
-                        total_scripts += 1
+                final_status = "Конвейер выполнен успешно"
 
-        logger.debug(f"Всего активных скриптов: {total_scripts}")
+            full_report = f"{final_status}\n\nДетальный лог:\n" + "\n".join(execution_log)
 
-        # Сбор всех сообщений
-        execution_log = []
-        success_count = 0
-        has_errors = False
-        stop_on_error = self.config.get('settings_notify', {}).get('stop_on_error', 'true') == 'true'
+            # Отправка уведомлений
+            if self.should_notify(has_errors):
+                if self.config.get('settings_notify', {}).get('email', 'false') == 'true':
+                    self._send_email(full_report, has_errors)
 
-        # Запуск скриптов по категориям
-        for category in self.execution_order:
-            if has_errors and stop_on_error:
-                break
+                if self.config.get('settings_notify', {}).get('telegram', 'false') == 'true':
+                    self._send_telegram(final_status, has_errors)
 
-            # Заголовок группы
-            if category == 'additional':
-                logger.info("\n=== Исполняется группа скриптов дополнительного функционала ===")
-            elif category == 'base':
-                logger.info("\n=== Исполняется группа скриптов основного функционала ===")
-            elif category == 'maintenance':
-                logger.info("\n=== Исполняется группа скриптов обслуживания ===")
+            # Push-heartbeat: "оркестратор жив"
+            self.send_push_heartbeat(is_fatal=False)
 
-            if category == 'base':
-                # Обработка base скриптов (аналогично additional)
-                for base_name, full_name in self.script_categories[category]:
-                    if not self.is_script_enabled(category, base_name):
-                        msg = f"[SKIP] Скрипт {category}/{full_name} отключен в конфигурации"
-                        logger.info(msg)
-                        execution_log.append(msg)
-                        continue
+            if has_errors:
+                sys.exit(1)
 
-                    cache_interval = self.get_cache_interval(category, base_name)
+            logger.info("=" * 36)
+            logger.info("MikroTik-ARMA Orchestrator: FINISHED")
+            logger.info("=" * 36)
 
-                    if not self.script_cache.is_script_required(category, full_name, cache_interval):
-                        msg = f"[CACHE] Скрипт {category}/{full_name} пропущен (кэш актуален)"
-                        logger.info(msg)
-                        execution_log.append(msg)
-                        continue
-
-                    if not self.should_restart_after_error(category, full_name):
-                        msg = f"[ERROR_DELAY] Скрипт {category}/{full_name} пропущен (время до перезапуска после ошибки не истекло)"
-                        logger.info(msg)
-                        execution_log.append(msg)
-                        continue
-
-                    script_result = self.run_script(category, full_name, base_name)
-
-                    if script_result:
-                        success_count += 1
-                        self.script_cache.update_script_timestamp(category, full_name)
-                        execution_log.append(f"[OK] Скрипт {category}/{full_name} выполнен успешно")
-                    else:
-                        execution_log.append(f"[ERROR] Скрипт {category}/{full_name} завершился с ошибкой")
-                        has_errors = True
-                        if stop_on_error:
-                            break
-
-            elif category == 'additional':
-                # Обработка additional скриптов
-                for base_name, full_name in self.script_categories[category]:
-                    if not self.is_script_enabled(category, base_name):
-                        msg = f"[SKIP] Скрипт {category}/{full_name} отключен в конфигурации"
-                        logger.info(msg)
-                        execution_log.append(msg)
-                        continue
-
-                    cache_interval = self.get_cache_interval(category, base_name)
-
-                    if not self.script_cache.is_script_required(category, full_name, cache_interval):
-                        msg = f"[CACHE] Скрипт {category}/{full_name} пропущен (кэш актуален)"
-                        logger.info(msg)
-                        execution_log.append(msg)
-                        continue
-
-                    if not self.should_restart_after_error(category, full_name):
-                        msg = f"[ERROR_DELAY] Скрипт {category}/{full_name} пропущен (время до перезапуска после ошибки не истекло)"
-                        logger.info(msg)
-                        execution_log.append(msg)
-                        continue
-
-                    script_result = self.run_script(category, full_name, base_name)
-
-                    if script_result:
-                        success_count += 1
-                        self.script_cache.update_script_timestamp(category, full_name)
-                        execution_log.append(f"[OK] Скрипт {category}/{full_name} выполнен успешно")
-                    else:
-                        execution_log.append(f"[ERROR] Скрипт {category}/{full_name} завершился с ошибкой")
-                        has_errors = True
-                        if stop_on_error:
-                            break
-
-            elif category == 'maintenance':
-                # Обработка maintenance скриптов
-                for base_name, full_name in self.script_categories[category]:
-                    if not self.is_script_enabled(category, base_name):
-                        msg = f"[SKIP] Скрипт {category}/{full_name} отключен в конфигурации"
-                        logger.info(msg)
-                        execution_log.append(msg)
-                        continue
-
-                    cache_interval = self.get_cache_interval(category, base_name)
-
-                    if not self.script_cache.is_script_required(category, full_name, cache_interval):
-                        msg = f"[CACHE] Скрипт {category}/{full_name} пропущен (кэш актуален)"
-                        logger.info(msg)
-                        execution_log.append(msg)
-                        continue
-
-                    if not self.should_restart_after_error(category, full_name):
-                        msg = f"[ERROR_DELAY] Скрипт {category}/{full_name} пропущен (время до перезапуска после ошибки не истекло)"
-                        logger.info(msg)
-                        execution_log.append(msg)
-                        continue
-
-                    script_result = self.run_script(category, full_name, base_name)
-
-                    if script_result:
-                        success_count += 1
-                        self.script_cache.update_script_timestamp(category, full_name)
-                        execution_log.append(f"[OK] Скрипт {category}/{full_name} выполнен успешно")
-                    else:
-                        execution_log.append(f"[ERROR] Скрипт {category}/{full_name} завершился с ошибкой")
-                        has_errors = True
-                        if stop_on_error:
-                            break
-
-            if has_errors and self.config.get('settings_notify', {}).get('stop_on_error', 'true') == 'true':
-                break
-
-        # Итоговый отчет
-        final_status = f"Успешно выполнено {success_count}/{total_scripts} скриптов"
-        full_report = f"{final_status}\n\nДетальный лог:\n" + "\n".join(execution_log)
-
-        # Отправка уведомлений
-        if self.should_notify(has_errors):
-            if self.config.get('settings_notify', {}).get('email', 'false') == 'true':
-                self._send_email(full_report, has_errors)
-
-            if self.config.get('settings_notify', {}).get('telegram', 'false') == 'true':
-                self._send_telegram(final_status, has_errors)
-
-        if has_errors:
-            sys.exit(1)
-
-        logger.info("=" * 36)
-        logger.info("MikroTik-ARMA Orchestrator: FINISHED")
-        logger.info("=" * 36)
+        finally:
+            # Освобождает лок
+            self._release_lock()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='MikroTik-ARMA Orchestrator')
