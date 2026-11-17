@@ -32,9 +32,6 @@ def validate_directory(dir_path: str, dir_description: str, logger=None) -> str:
     if not os.path.isabs(dir_path):
         dir_path = os.path.abspath(dir_path)
 
-    if not os.path.exists(dir_path):
-        os.makedirs(dir_path, exist_ok=True)
-        logger.info(f"Создана директория {dir_description}: {dir_path}")
     elif not os.path.isdir(dir_path):
         raise NotADirectoryError(f"{dir_description} не является директорией: {dir_path}")
 
@@ -43,6 +40,7 @@ def validate_directory(dir_path: str, dir_description: str, logger=None) -> str:
 def load_ip_lists_from_paths(paths_input, days_threshold=None, logger=None) -> Tuple[str, Set[str]]:
     """
     Загружает все TXT, JSON и YAML файлы из указанных путей.
+    Пути могут быть как директориями, так и отдельными файлами.
     Поддерживаемые форматы:
     - TXT: простой список IP, по одному на строку
     - JSON: структура с 'addresses' и 'last_seen' для каждого IP (генерируется через get_IP_Connections-*.py)
@@ -75,133 +73,146 @@ def load_ip_lists_from_paths(paths_input, days_threshold=None, logger=None) -> T
         threshold_date = datetime.now() - timedelta(days=days_threshold)
         logger.info(f"Применена фильтрация по времени: исключаются IP старше {days_threshold} дней")
 
+    def _process_file(file_path: str, filename: str) -> None:
+        """Обрабатывает один файл и обновляет all_ips."""
+        # Обработка TXT файлов
+        if filename.endswith('.txt'):
+            try:
+                with open(file_path, 'r') as f:
+                    ips = {line.strip() for line in f if line.strip()}
+                    all_ips.update(ips)
+                    logger.info(f"Загружен TXT файл {filename}: {len(ips)} IP-адресов")
+            except Exception as e:
+                logger.warning(f"Не удалось загрузить TXT файл {filename}: {e}")
+            return
+
+        # Обработка JSON файлов
+        elif filename.endswith('.json'):
+            try:
+                with open(file_path, 'r') as f:
+                    data = json.load(f)
+
+                addresses = data.get('addresses', {})
+
+                if days_threshold is not None:
+                    filtered_ips = set()
+                    for ip, ip_data in addresses.items():
+                        last_seen_str = ip_data.get('last_seen')
+                        if last_seen_str:
+                            try:
+                                last_seen_date = datetime.strptime(last_seen_str, '%Y-%m-%d %H:%M:%S')
+                                if last_seen_date >= threshold_date:
+                                    filtered_ips.add(ip)
+                            except ValueError:
+                                filtered_ips.add(ip)
+                        else:
+                            filtered_ips.add(ip)
+
+                    all_ips.update(filtered_ips)
+                    logger.info(f"Загружен JSON файл {filename}: {len(filtered_ips)} IP-адресов (после фильтрации по времени)")
+                else:
+                    ips_from_json = set(addresses.keys())
+                    all_ips.update(ips_from_json)
+                    logger.info(f"Загружен JSON файл {filename}: {len(ips_from_json)} IP-адресов")
+            except Exception as e:
+                logger.warning(f"Не удалось загрузить JSON файл {filename}: {e}")
+            return
+
+        # Обработка YAML/YML файлов
+        elif filename.endswith(('.yaml', '.yml')):
+            try:
+                with open(file_path, 'r') as f:
+                    data = yaml.safe_load(f)
+
+                if 'categories' in data:
+                    all_historical_ips = set()
+
+                    for category_name, category_data in data['categories'].items():
+                        for domain_name, domain_info in category_data.items():
+                            ipv4_data = domain_info.get('ipv4', {})
+                            historical_ips = ipv4_data.get('historical', {})
+
+                            if days_threshold is not None:
+                                filtered_ips = set()
+                                for ip, last_seen_str in historical_ips.items():
+                                    if last_seen_str:
+                                        try:
+                                            last_seen_date = datetime.strptime(last_seen_str, '%Y-%m-%d %H:%M:%S')
+                                            if last_seen_date >= threshold_date:
+                                                filtered_ips.add(ip)
+                                        except ValueError:
+                                            filtered_ips.add(ip)
+                                    else:
+                                        filtered_ips.add(ip)
+
+                                all_historical_ips.update(filtered_ips)
+                            else:
+                                ips_from_yaml = set(historical_ips.keys())
+                                all_historical_ips.update(ips_from_yaml)
+
+                    all_ips.update(all_historical_ips)
+
+                    if days_threshold is not None:
+                        logger.info(f"Загружен YAML файл {filename}: {len(all_historical_ips)} IP-адресов из historical (после фильтрации по времени)")
+                    else:
+                        logger.info(f"Загружен YAML файл {filename}: {len(all_historical_ips)} IP-адресов из historical")
+                else:
+                    logger.warning(f"YAML файл {filename} имеет нестандартную структуру")
+            except Exception as e:
+                logger.warning(f"Не удалось загрузить YAML файл {filename}: {e}")
+            return
+
     # Обработка каждого пути
     processed_paths = []
     for path in paths:
         try:
-            abs_path = validate_directory(path, "Директория с IP-списками")
-            processed_paths.append(abs_path)
+            abs_path = os.path.abspath(path)
 
-            for filename in os.listdir(abs_path):
-                file_path = os.path.join(abs_path, filename)
+            if os.path.isfile(abs_path):
+                # Одиночный файл
+                processed_paths.append(abs_path)
+                filename = os.path.basename(abs_path)
+                _process_file(abs_path, filename)
 
-                # Обработка TXT файлов
-                if filename.endswith('.txt'):
-                    try:
-                        with open(file_path, 'r') as f:
-                            ips = {line.strip() for line in f if line.strip()}
-                            all_ips.update(ips)
-                            logger.info(f"Загружен TXT файл {filename}: {len(ips)} IP-адресов")
-                    except Exception as e:
-                        logger.error(f"Ошибка загрузки TXT файла {filename}: {e}")
-                    continue
+            elif os.path.isdir(abs_path):
+                # Директория — обрабатывает все поддерживаемые файлы внутри
+                processed_paths.append(abs_path)
 
-                # Обработка JSON файлов
-                elif filename.endswith('.json'):
-                    try:
-                        with open(file_path, 'r') as f:
-                            data = json.load(f)
-
-                        # Извлечение IP адреса из структуры JSON
-                        addresses = data.get('addresses', {})
-
-                        if days_threshold is not None:
-                            # Фильтрация IP по времени last_seen
-                            filtered_ips = set()
-                            for ip, ip_data in addresses.items():
-                                last_seen_str = ip_data.get('last_seen')
-                                if last_seen_str:
-                                    try:
-                                        last_seen_date = datetime.strptime(last_seen_str, '%Y-%m-%d %H:%M:%S')
-                                        if last_seen_date >= threshold_date:
-                                            filtered_ips.add(ip)
-                                    except ValueError:
-                                        filtered_ips.add(ip)
-                                else:
-                                    filtered_ips.add(ip)
-
-                            all_ips.update(filtered_ips)
-                            logger.info(f"Загружен JSON файл {filename}: {len(filtered_ips)} IP-адресов (после фильтрации по времени)")
-
-                        else:
-                            # Без фильтрации по времени - берёт все IP
-                            ips_from_json = set(addresses.keys())
-                            all_ips.update(ips_from_json)
-                            logger.info(f"Загружен JSON файл {filename}: {len(ips_from_json)} IP-адресов")
-
-                    except Exception as e:
-                        logger.error(f"Ошибка загрузки JSON файла {filename}: {e}")
+                for filename in os.listdir(abs_path):
+                    file_path = os.path.join(abs_path, filename)
+                    if not os.path.isfile(file_path):
                         continue
+                    _process_file(file_path, filename)
 
-                # Обработка YAML/YML файлов
-                elif filename.endswith(('.yaml', '.yml')):
-                    try:
-                        with open(file_path, 'r') as f:
-                            data = yaml.safe_load(f)
-
-                        # Проверка структуры файла results-dns.yaml
-                        if 'categories' in data:
-                            all_historical_ips = set()
-
-                            # Обходит все категории и домены
-                            for category_name, category_data in data['categories'].items():
-                                for domain_name, domain_info in category_data.items():
-                                    ipv4_data = domain_info.get('ipv4', {})
-                                    historical_ips = ipv4_data.get('historical', {})
-
-                                    if days_threshold is not None:
-                                        # Фильтрация IP по времени last_seen в historical
-                                        filtered_ips = set()
-                                        for ip, last_seen_str in historical_ips.items():
-                                            if last_seen_str:
-                                                try:
-                                                    last_seen_date = datetime.strptime(last_seen_str, '%Y-%m-%d %H:%M:%S')
-                                                    if last_seen_date >= threshold_date:
-                                                        filtered_ips.add(ip)
-                                                except ValueError:
-                                                    # Если неверный формат даты, включает IP
-                                                    filtered_ips.add(ip)
-                                            else:
-                                                # Если нет даты, включает IP
-                                                filtered_ips.add(ip)
-
-                                        all_historical_ips.update(filtered_ips)
-                                    else:
-                                        # Без фильтрации - берет все IP из historical
-                                        ips_from_yaml = set(historical_ips.keys())
-                                        all_historical_ips.update(ips_from_yaml)
-
-                            all_ips.update(all_historical_ips)
-
-                            if days_threshold is not None:
-                                logger.info(f"Загружен YAML файл {filename}: {len(all_historical_ips)} IP-адресов из historical (после фильтрации по времени)")
-
-                        else:
-                            logger.warning(f"YAML файл {filename} имеет нестандартную структуру, пропускаем")
-                    except Exception as e:
-
-                        logger.error(f"Ошибка загрузки YAML файла {filename}: {e}")
-                        continue
-
-                else:
-                    continue
+            else:
+                raise FileNotFoundError(f"Путь не найден: {abs_path}")
 
         except Exception as e:
             logger.error(f"Ошибка загрузки из пути {path}: {e}")
             continue
 
-    if not all_ips:
-        logger.warning(f"Не найдено IP-адресов в указанных путях")
-
     # Определение имени для использования
-    # Если указано несколько путей, создаст объединенное имя
+    if not processed_paths:
+        logger.warning("Не обработано ни одного пути")
+        return "unknown", all_ips
+
     if len(processed_paths) > 1:
-        dir_names = [os.path.basename(p) for p in processed_paths]
-        combined_name = "_".join(dir_names)
-        logger.info(f"Объединено {len(processed_paths)} директорий: {combined_name}")
+        # Если среди путей есть директории — использует текущий basename;
+        name_parts = []
+        for p in processed_paths:
+            if os.path.isdir(p):
+                name_parts.append(os.path.basename(p))
+            else:
+                name_parts.append(Path(p).stem)
+        combined_name = "_".join(name_parts)
+        logger.info(f"Объединено {len(processed_paths)} путей: {combined_name}")
         return combined_name, all_ips
     else:
-        dir_name = os.path.basename(processed_paths[0])
+        p = processed_paths[0]
+        if os.path.isdir(p):
+            dir_name = os.path.basename(p)
+        else:
+            dir_name = Path(p).stem
         return dir_name, all_ips
 
 def load_dns_ips(file_path: str, logger=None) -> Set[str]:
@@ -1216,7 +1227,7 @@ class IpAnalystCore:
             dir_name, all_source_ips = self.load_ip_lists_from_paths(ip_list_dir)
 
             if not all_source_ips:
-                self.logger.warning("Нет IP-адресов для обработки")
+                self.logger.error("Нет IP-адресов для обработки")
                 return
 
             self.logger.info(f"Всего загружено IP-адресов из всех файлов: {len(all_source_ips)}")
