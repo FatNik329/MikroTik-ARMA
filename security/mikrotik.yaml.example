@@ -1,0 +1,36 @@
+devices:
+  master1: # Раздел настроек для Master устройств. 1-й master
+    name: "DescriptionMaster1"     # Удобочитаемое имя - описание
+    host: 192.168.0.1              # IP адрес подключения
+    username: "<Your_username_Master1>"               # Имя пользователя для подключения
+    password: "<Password_username_Master1>"    # Пароль пользователя
+    type_auth:            # Раздел настроек авторизации. Опциональный, более приоритетный, чем configs/config.yaml
+      use_ssl: true       # Использовать SSL для подключения к конкретному устройству
+    type_mode: "ips-asn"  # Режим синхронизации устройства. Опциональный, но более приоритетный, чем configs/config.yaml
+    settings:             # Раздел индивидуальных доп. настроек для Master устройства. Опциональные.
+      batch_size: 1500    # Переопределение общего batch_size (скорость добавления адресов)
+      update_delay: 0.1   # Задержка между добавляемыми адресами
+      list_name: ["ExampleList", "BlockingService"] # Параметр определения AddressList для синхронизации. Опциональный, более приоритетный, чем configs/address_lists.yaml
+    slaves:                             # Раздел настроек Slave устройств
+      - name: "DescriptionSlave1"       # Удобочитаемое имя - описание. 1-й slave
+        host: 192.168.1.1               # IP адрес подключения
+        username: "<Your_username_Slave1>"          # Имя пользователя для подключения
+        password: "<Password_username_Slave1>"     # Пароль пользователя
+        type_auth:            # Раздел настроек авторизации. Опциональный, более приоритетный, чем configs/config.yaml
+          use_ssl: true       # Использовать SSL для подключения к конкретному устройству.
+        settings:             # Раздел доп. настроек для Slave устройства
+          batch_size: 1500    # Переопределение общего batch_size (скорость добавления адресов)
+          update_delay: 0.1   # Задержка между добавляемыми адресами
+        list_sync: ["TestLists", "ExampleList"]      # Список Address Lists для синxронизации с Master устройством
+      - name: "DescriptionSlave2"      # 2-й slave
+        host: 10.10.10.100
+        username: "<Your_username_Slave2>"
+        password: "<Password_username_Slave2>"
+        settings:
+          batch_size: 1500
+          update_delay: 0.1
+        list_sync: ["TestLists"]
+
+ master2: # Раздел настроек для Master устройств. 2-й master
+    name: "DescriptionMaster2"     # Удобочитаемое имя - описание
+    #...
