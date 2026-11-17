@@ -1,0 +1,13 @@
+# =================================================
+# Настройка группы скриптов filter_results_dns-*.py
+# =================================================
+
+#ExampleScripts1 <- 1-й пример конфигурации скрипта-клиента из scripts/additional/filter_results_dns/
+ExampleScripts1:
+  input_file: 'raw-data/ExampleList/DNS/results-dns.yaml'  # Путь до входящего YAML (results-dns.yaml) для обработки
+  output_file: 'raw-data/ExampleList/DNS/filter-results-dns.yaml' # Путь сохранения обработанного results-dns.yaml
+  domains_catsort: true # true/false. Генерировать дополнительный файл с категоризацией доменов 2-го ур.
+
+#ExampleScripts2 <- 2-й пример конфигурации скрипта-клиента из scripts/additional/filter_results_dns/
+ExampleScripts2:
+  ...
