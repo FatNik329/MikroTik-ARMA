@@ -266,7 +266,7 @@ def main():
 
     # Скачиваем файл
     if not download_source_file():
-        logging.error("Не удалось скачать файл.")
+        logging.error("Ошибка при скачивании файла.")
         return
 
     # Читаем содержимое файла
@@ -282,7 +282,7 @@ def main():
     domains = parse_tld_domains(file_content)
 
     if not domains:
-        logging.error("Не удалось извлечь домены из файла")
+        logging.error("Ошибка при извлечении доменов из файла.")
         success = False
         return
 
@@ -309,3 +309,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
