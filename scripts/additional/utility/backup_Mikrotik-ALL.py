@@ -86,16 +86,16 @@ class MikroTikBackup:
             return True
 
         except paramiko.AuthenticationException:
-            logging.error(f"Ошибка авторизации на устройстве {self.host}")
+            logging.warning(f"Ошибка авторизации на устройстве {self.host}")
             return False
         except paramiko.SSHException as e:
-            logging.error(f"SSH ошибка на {self.host}: {str(e)}")
+            logging.warning(f"SSH ошибка на {self.host}: {str(e)}")
             return False
         except socket.timeout:
-            logging.error(f"Timeout подключения к {self.host}")
+            logging.warning(f"Timeout подключения к {self.host}")
             return False
         except Exception as e:
-            logging.error(f"Ошибка при подключении к {self.host}: {str(e)}")
+            logging.warning(f"Ошибка при подключении к {self.host}: {str(e)}")
             return False
 
     def get_device_name(self):
@@ -187,11 +187,6 @@ class MikroTikBackup:
                 return True
             else:
                 logging.error(f"Бэкап файл невалиден: {file_path}")
-                # Удаляем невалидный файл
-              #  try:
-              #      file_path.unlink()
-              #  except:
-              #      pass
                 return False
 
         except Exception as e:
@@ -237,7 +232,7 @@ def main():
 
     for device_ip in DEVICES:
         try:
-            # Проверяем, есть ли индивидуальные учетные данные для устройства
+            # Проверяет, есть ли индивидуальные учетные данные для устройства
             if device_ip in SPECIAL_CREDENTIALS:
                 creds = SPECIAL_CREDENTIALS[device_ip]
                 username = creds[0]
@@ -280,7 +275,7 @@ def main():
     else:
         logging.warning(f"Имеются неудачные бэкапы: {failed_backups}")
         logging.info("=== Выполнение завершено ===")
-        return 1
+        return 0
 
 if __name__ == "__main__":
     try:
