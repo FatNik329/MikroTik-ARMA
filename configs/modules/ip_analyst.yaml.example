@@ -1,0 +1,27 @@
+# Модульный файл конфигурации.
+# Более приоритетный, чем общий файл конфигурации configs/config.yaml
+# =========================================
+# Настройка группы скриптов ip_analyst-*.py
+# =========================================
+
+#ExampleScripts1 <- 1-й пример конфигурации скрипта-клиента из scripts/additional/ip_analyst/
+ExampleScripts1: # имя скрипта из scripts/additional/ip_analyst/ip_analyst-ExampleScript.py
+  ip_list_dir: ['raw-data/ExampleList1/DNS/', 'raw-data/ExampleList2/DNS/'] # Входные данные для отбора и фильтрации (поддерживает TXT, JSON, YAML)
+  mapping_file_path: ['raw-data/ASN-db/ip-to-asn.schema.json'] # Путь до схемы файла (маппинг данных) структуры MMDB. Хранится по тому же пути, что MMDB (если скачана через скрипт scripts/additional/utility/get_asn_mmdb.py)
+  dns_file_filter: 'none'  # Входной файл results-dns.yaml для исключения адресов
+  asn_db_file: 'raw-data/ASN-db/ip-to-asn.mmdb' # MMDB база для отбора и обогащения адресов 
+  output_dir: 'output-data/NewExampleList/Custom' # Путь директории для сохранения выходных данных
+  output_filename: 'My-NewExampleList' # Имя используемое для названия файла и формируемого AddressList (RSC)
+  prefix_threshold: 3 # Количество IP адресов в префиксе для его агрегации
+  asn_include: 'none' # Фильтрация по ASN (включение). Пример: ['AS12345', 'AS23456']
+  asn_exclude: 'none' # Фильтрация по ASN (исключение). Пример: ['AS12345', 'AS23456']
+  country_include: 'none' # Фильтрация для включения по коду страны. Пример ["AZ", "AM"]
+  country_exclude: 'none' # Фильтрация для ислючения по коду страны. Пример ["AZ", "AM"]
+  remove_last_seen: 100 # Удаляет IP адреса старшее N дней. Работает только с JSON, YAML.
+  report_generation: true  # или false - создает отчет об обработанных данных в отдельном файле
+  prefix_size: 24 # Размер префикса агрегации. Поддерживает от /16 до /32, по умолчанию /24.
+  exclude_non_aggregated_ips: false  # True/False - включить исключение одиночных IP
+
+#ExampleScripts2 <- 2-й пример конфигурации скрипта-клиента из scripts/additional/ip_analyst/
+ExampleScripts2:
+  #... Описание параметров ExampleScripts2
