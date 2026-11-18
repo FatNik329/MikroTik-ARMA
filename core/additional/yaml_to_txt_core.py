@@ -266,7 +266,7 @@ class YAMLToTXTConverter:
         result = {}
 
         try:
-            with open(yaml_path, 'r', encoding=self.config["encoding"]) as file:
+            with open(yaml_path, 'r') as file:
                 data = yaml.safe_load(file)
 
             if not data:
@@ -331,7 +331,7 @@ class YAMLToTXTConverter:
 
             if type_generation == 'recreation':
                 # Режим пересоздания - генерация файлов TXT с нуля
-                with open(txt_path, 'w', encoding=self.config["encoding"]) as file:
+                with open(txt_path, 'w') as file:
                     for ip in sorted_ips:
                         file.write(f"{ip}\n")
 
@@ -339,7 +339,7 @@ class YAMLToTXTConverter:
 
             elif type_generation == 'additive':
                 # Режим дозаписи
-                with open(txt_path, 'a+', encoding=self.config["encoding"]) as file:
+                with open(txt_path, 'a+') as file:
                     file.seek(0)
                     existing_ips = set(line.strip() for line in file if line.strip())
 
@@ -358,7 +358,7 @@ class YAMLToTXTConverter:
             else:
                 self.logger.error(f"Неизвестный тип генерации: {type_generation}. Используется режим 'additive'")
                 # Использовать режим дозаписи по умолчанию
-                with open(txt_path, 'a+', encoding=self.config["encoding"]) as file:
+                with open(txt_path, 'a+') as file:
                     file.seek(0)
                     existing_ips = set(line.strip() for line in file if line.strip())
                     file.seek(0, 2)
@@ -449,4 +449,3 @@ class YAMLToTXTConverter:
 
 if __name__ == "__main__":
     main()
-
