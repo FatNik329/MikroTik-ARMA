@@ -1,0 +1,16 @@
+# Модульный файл конфигурации.
+# Более приоритетный, чем общий файл конфигурации configs/config.yaml
+# ==========================================
+# Настройка группы скриптов yaml_to_txt-*.py
+# ==========================================
+
+#ExampleScript1 <- 1-й пример конфигурации скрипта-клиента из scripts/additional/yaml_to_txt/
+ExampleList1:
+  yaml_paths: ['raw-data/ExampleList/DNS/results-dns.yaml'] # Входные данные для конвертации
+  output_dir: 'raw-data/NewExampleList/TXT'                 # Выходные данные после конвертации
+  recursive_search: false                                   # true/false. Рекурсивный поиск
+  type_generation: 'recreation'                             # Тип генерации: recreation - полностью пересоздаёт TXT файлы /additive - режим дозаписывания, без полного затирания TXT
+
+#ExampleScript2 <- 2-й пример конфигурации скрипта-клиента из scripts/additional/yaml_to_txt/
+ExampleList1:
+  #... описание параметров
