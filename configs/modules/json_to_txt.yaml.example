@@ -1,0 +1,18 @@
+# Модульный файл конфигурации.
+# Более приоритетный, чем общий файл конфигурации configs/config.yaml
+# ==========================================
+# Настройка группы скриптов json_to_txt-*.py
+# ==========================================
+
+#ExampleScript1 <- 1-й пример конфигурационного файла скрипта-клиента из scripts/additional/json_to_txt/
+ExampleScript1:
+  json_paths:
+    - 'raw-data/ExampleList/report/ExampleList-report.json'
+#   - 'raw-data/ExampleList2/report/ExampleList-report.json'
+  output_dir: 'raw-data/NewExampleList/TXT/JSON'
+  recursive_search: false
+  type_generation: 'recreation' # Тип генерации: recreation - полностью пересоздаёт TXT файлы /additive - режим дозаписывания, без полного затирания TXT
+
+#ExampleScript2 <- 2-й пример конфигурационного файла скрипта-клиента из scripts/additional/json_to_txt/
+ExampleScript2:
+  #... описание параметров
